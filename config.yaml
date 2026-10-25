@@ -1,0 +1,70 @@
+# PaperTrader settings. PAPER TRADING ONLY - no broker, no real money.
+# Every tunable lives here. Secrets do NOT belong here (use .env).
+
+capital: 1000000            # starting paper capital in INR
+
+universe:                   # NSE tickers in Yahoo Finance format
+  - RELIANCE.NS
+  - TCS.NS
+  - HDFCBANK.NS
+  - ICICIBANK.NS
+  - INFY.NS
+  - HINDUNILVR.NS
+  - ITC.NS
+  - SBIN.NS
+  - BHARTIARTL.NS
+  - LT.NS
+
+benchmark: "^NSEI"          # Nifty 50 index (dashboard comparison only)
+
+data:
+  start: 2014-01-01         # first date to download (gives indicator warm-up before train_start)
+  cache_dir: data/cache
+  cache_ttl_hours: 6        # re-download after this many hours
+  market_tz: Asia/Kolkata
+  market_close_cutoff: "15:45"   # a bar dated today is treated as incomplete before this IST time
+
+costs:
+  per_side_pct: 0.2         # conservative all-in cost per buy or sell (brokerage+STT+slippage)
+
+backtest:
+  train_start: 2015-01-01   # in-sample period
+  train_end: 2021-12-31
+  test_start: 2022-01-01    # out-of-sample period (used for ranking)
+  test_end: null            # null = up to the latest available bar
+  apply_stop_loss: true     # use risk.stop_loss_pct inside backtests too
+
+selection:
+  rerank_every_days: 30     # calendar days between re-ranking strategies
+  min_trades: 5             # out-of-sample trades needed before a strategy can qualify
+  overfit_sharpe_ratio_min: 0.5   # warn if OOS Sharpe < 0.5 x in-sample Sharpe
+  overfit_cagr_gap_pct: 15        # warn if in-sample CAGR beats OOS CAGR by > 15 points
+
+strategies:
+  ma_crossover:
+    enabled: true
+    fast: 20
+    slow: 50
+  rsi_bounce:
+    enabled: true
+    period: 14
+    oversold: 30
+    exit_above: 70
+  breakout:
+    enabled: true
+    entry_lookback: 20
+    exit_lookback: 10
+
+risk:
+  max_position_pct: 10      # max % of equity in one position
+  stop_loss_pct: 5          # exit if price falls this % below entry
+  max_open_positions: 5
+  max_daily_loss_pct: 2     # no new buys for the day after equity drops this much in one day
+
+storage:
+  sqlite_path: data/papertrader.db   # local store; also the fallback when Supabase is down
+  use_supabase: true                 # needs SUPABASE_URL + SUPABASE_SERVICE_KEY in .env
+  require_supabase: false            # true = refuse to run without Supabase (CI sets this via env)
+
+logging:
+  dir: logs

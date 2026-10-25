@@ -1,0 +1,23 @@
+# Secrets - never commit
+.env
+.env.*
+!.env.example
+dashboard/.streamlit/secrets.toml
+.streamlit/secrets.toml
+
+# Local data, state and output
+data/
+logs/
+reports/
+*.db
+*.db-journal
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+build/
+dist/

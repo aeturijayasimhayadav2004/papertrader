@@ -1,0 +1,71 @@
+# Daily paper-trading run. PAPER ONLY - no broker, no real money.
+# Runs after the NSE close on weekdays. Safe to re-run: processed days are skipped.
+name: daily-paper-trade
+
+on:
+  schedule:
+    - cron: "0 11 * * 1-5"   # 11:00 UTC = 16:30 IST, Mon-Fri
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Recompute the latest trading day"
+        type: boolean
+        default: false
+
+concurrency:
+  group: daily-paper-trade
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          pip install -r requirements.txt
+          pip install -e . --no-deps
+
+      - name: Tests (no trading if the code is broken)
+        run: python -m pytest -q
+
+      # Local SQLite + price cache from the previous run (fallback if Supabase is down).
+      - name: Restore local state
+        uses: actions/cache/restore@v4
+        with:
+          path: data/
+          key: papertrader-data-${{ github.run_id }}
+          restore-keys: papertrader-data-
+
+      - name: Run bot
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          PAPERTRADER_REQUIRE_SUPABASE: "1"
+        run: python scripts/run_daily.py ${{ inputs.force && '--force' || '' }}
+
+      - name: Save local state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data/
+          key: papertrader-data-${{ github.run_id }}
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ github.run_id }}
+          path: logs/
+          retention-days: 30
+          if-no-files-found: ignore
