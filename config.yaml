@@ -25,7 +25,18 @@ data:
   market_close_cutoff: "15:45"   # a bar dated today is treated as incomplete before this IST time
 
 costs:
-  per_side_pct: 0.2         # conservative all-in cost per buy or sell (brokerage+STT+slippage)
+  model: india_delivery     # india_delivery (itemised NSE delivery charges) | flat (per_side_pct each side)
+  per_side_pct: 0.2         # used only by the flat model
+  india:                    # check your broker's charges page; these change with budgets / plans
+    brokerage_pct: 0.0      # Zerodha / most discount brokers: 0 for delivery
+    brokerage_cap: 20       # max brokerage per order, INR
+    stt_pct: 0.1            # securities transaction tax, buy and sell
+    exchange_pct: 0.00297   # NSE transaction charge
+    sebi_per_crore: 10
+    stamp_buy_pct: 0.015    # stamp duty, buy side only
+    gst_pct: 18             # on brokerage + exchange + SEBI fees
+    dp_charge_per_sell: 15.93   # depository charge per stock sold, INR (incl. GST)
+    slippage_pct: 0.05      # allowance for filling worse than the open
 
 backtest:
   train_start: 2015-01-01   # in-sample period
@@ -35,6 +46,10 @@ backtest:
   apply_stop_loss: true     # use risk.stop_loss_pct inside backtests too
 
 selection:
+  method: walk_forward      # holdout (one test period) | walk_forward (also must win most yearly folds)
+  criterion: return         # return | sharpe : what "beats buy-and-hold" means
+  wf_fold_months: 12
+  wf_min_fold_win_rate: 0.5 # share of folds a strategy must win
   rerank_every_days: 30     # calendar days between re-ranking strategies
   min_trades: 5             # out-of-sample trades needed before a strategy can qualify
   overfit_sharpe_ratio_min: 0.5   # warn if OOS Sharpe < 0.5 x in-sample Sharpe
@@ -54,12 +69,61 @@ strategies:
     enabled: true
     entry_lookback: 20
     exit_lookback: 10
+  supertrend:
+    enabled: true
+    period: 10
+    multiplier: 3
+  bollinger_reversion:
+    enabled: true
+    window: 20
+    num_std: 2
+    trend_window: 200
+  momentum:
+    enabled: true
+    lookback: 126           # ~6 months
+    skip: 5                 # ignore the last week (short-term reversal)
+    min_return_pct: 10
+    trend_window: 100
 
 risk:
   max_position_pct: 10      # max % of equity in one position
-  stop_loss_pct: 5          # exit if price falls this % below entry
+  stop_loss_pct: 5          # exit if price falls this % below entry (the widest stop allowed in ATR mode)
+  stop_mode: fixed          # fixed | atr (atr_multiple x ATR below entry, never wider than stop_loss_pct)
+  atr_period: 14
+  atr_multiple: 2.5
+  trailing_stop_pct: null   # e.g. 8 = stop trails 8% below the highest close since entry
+  take_profit_pct: null     # e.g. 20 = sell when the high reaches +20%
+  sizing: fixed_pct         # fixed_pct | risk_based (lose ~risk_per_trade_pct of equity if stopped out)
+  risk_per_trade_pct: 1
   max_open_positions: 5
   max_daily_loss_pct: 2     # no new buys for the day after equity drops this much in one day
+  max_new_orders_per_day: 5
+  max_price_jump_pct: 20    # a one-day move bigger than this is treated as a data error (no new buy)
+
+regime:                     # market filter: new buys only while the benchmark is above its average
+  enabled: true
+  sma_window: 200
+
+protections:                # circuit breakers (Freqtrade-style); they only block NEW buys
+  cooldown_days: 3          # no re-entry into a stock for 3 days after exiting it
+  stoploss_guard:
+    lookback_days: 10
+    max_stops: 4            # 4 stop-losses in 10 days ...
+    pause_days: 5           # ... pause all buys for 5 days
+  max_drawdown:
+    max_drawdown_pct: 8     # equity down 8% from its 60-day peak ...
+    lookback_days: 60
+    pause_days: 10          # ... pause all buys for 10 days
+  low_profit:
+    lookback_trades: 3      # last 3 trades in a stock lost money in total ...
+    lock_days: 30           # ... skip that stock for 30 days
+
+trading:
+  mode: paper               # only paper is implemented (see docs/ARCHITECTURE.md for the live plan)
+  kill_switch_file: KILL_SWITCH   # create this file (or set PAPERTRADER_KILL_SWITCH=1) to stop new buys
+
+notify:
+  telegram: true            # sends only if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are set
 
 storage:
   sqlite_path: data/papertrader.db   # local store; also the fallback when Supabase is down

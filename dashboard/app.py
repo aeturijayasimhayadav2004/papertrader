@@ -125,7 +125,7 @@ def today(snaps: pd.DataFrame) -> None:
     st.markdown(f"Decisions made at the close of **{as_of:%A %d %b %Y}**. Orders fill at the next trading day's open.")
     st.info(last.get("selection_note") or "")
     if last.get("trading_halted"):
-        st.error(f"Trading halted: {last.get('halt_reason')}")
+        st.error(f"New buys blocked: {last.get('halt_reason')}")
 
     dec = db.load("decisions", where=("as_of_date", as_of.isoformat()))
     if dec.empty:
@@ -234,19 +234,23 @@ def strategies() -> None:
     periods = bt[bt["strategy"] != "buy_and_hold"].groupby("period")[["start_date", "end_date"]].first()
     st.markdown(f"Last re-ranked on **{as_of}**. " + " | ".join(
         f"{p.replace('_', '-')}: {r.start_date} to {r.end_date}" for p, r in periods.iterrows()))
-    st.caption("Costs included (per side). A strategy trades only if it beat equal-weight buy-and-hold "
-               "out-of-sample. The out-of-sample period was used to pick strategies, so live paper results "
-               "are the only truly unseen test.")
+    st.caption("Costs included (itemised NSE charges + slippage). A strategy trades only if it beat "
+               "equal-weight buy-and-hold out-of-sample (and, in walk-forward mode, in most yearly folds). The "
+               "out-of-sample period was used to pick strategies, so live paper results are the only truly "
+               "unseen test.")
 
-    metrics = ["total_return", "cagr", "max_drawdown", "sharpe", "win_rate", "n_trades"]
+    metrics = [m for m in ["total_return", "cagr", "max_drawdown", "sharpe", "sortino", "calmar", "profit_factor",
+                           "win_rate", "n_trades"] if m in bt.columns and bt[m].notna().any()]
     wide = bt.pivot(index="strategy", columns="period", values=metrics)
     wide.columns = [f"{m} ({'IS' if p == 'in_sample' else 'OOS'})" for m, p in wide.columns]
     wide = wide[[f"{m} ({p})" for m in metrics for p in ("IS", "OOS")]]
-    flags = bt[bt["period"] == "out_of_sample"].set_index("strategy")[["qualified", "overfit_flag", "rank"]]
+    flag_cols = [c for c in ["fold_win_rate", "qualified", "overfit_flag", "rank"] if c in bt.columns]
+    flags = bt[bt["period"] == "out_of_sample"].set_index("strategy")[flag_cols]
     table = wide.join(flags).reset_index()
     fmt = {c: st.column_config.NumberColumn(c, format="percent") for c in table.columns
-           if c.split(" ")[0] in ("total_return", "cagr", "max_drawdown", "win_rate")}
-    fmt.update({c: st.column_config.NumberColumn(c, format="%.2f") for c in table.columns if c.startswith("sharpe")})
+           if c.split(" ")[0] in ("total_return", "cagr", "max_drawdown", "win_rate", "fold_win_rate")}
+    fmt.update({c: st.column_config.NumberColumn(c, format="%.2f") for c in table.columns
+                if c.split(" ")[0] in ("sharpe", "sortino", "calmar", "profit_factor")})
     st.dataframe(table, hide_index=True, width="stretch", column_config=fmt)
 
     oos = bt[bt["period"] == "out_of_sample"]

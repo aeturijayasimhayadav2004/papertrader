@@ -48,6 +48,7 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
     "backtest_results": ("id", {
         "id": "TEXT", "as_of_date": "TEXT", "strategy": "TEXT", "period": "TEXT", "start_date": "TEXT",
         "end_date": "TEXT", "total_return": "REAL", "cagr": "REAL", "max_drawdown": "REAL", "sharpe": "REAL",
+        "sortino": "REAL", "calmar": "REAL", "profit_factor": "REAL", "fold_win_rate": "REAL",
         "win_rate": "REAL", "n_trades": "INTEGER", "exposure": "REAL", "bh_return": "REAL",
         "excess_return": "REAL", "qualified": "INTEGER", "overfit_flag": "INTEGER", "rank": "INTEGER",
         "note": "TEXT",

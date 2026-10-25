@@ -1,15 +1,22 @@
 """Simulated broker. PAPER ONLY: nothing here talks to a real exchange.
 
 Orders are queued at a day's close and filled at the next trading day's open.
-Costs are charged per side. Stop-losses are checked against each day's low and
-fill at the stop price, or at the open if the stock gaps below the stop.
+Charges come from papertrader.costs. Stops, trailing stops and take-profit
+targets follow papertrader.exits, the same rules the backtester uses.
+
+`BrokerAPI` is the interface the runner relies on. A live adapter (see
+docs/ARCHITECTURE.md) must implement the same methods so strategies, risk and
+the runner do not change between paper and live.
 """
 from __future__ import annotations
 
 import datetime as dt
 import math
 from dataclasses import asdict, dataclass, field
-from typing import Any
+from typing import Any, Protocol
+
+from papertrader.costs import CostModel, as_cost_model
+from papertrader.exits import ExitRules, intraday_exit
 
 BUY, SELL = "BUY", "SELL"
 PENDING, FILLED, CANCELLED = "PENDING", "FILLED", "CANCELLED"
@@ -40,6 +47,7 @@ class Order:
     fill_price: float | None = None
     fees: float = 0.0
     note: str = ""
+    atr_at_signal: float | None = None  # for ATR stops: the ATR known at the signal close
 
 
 @dataclass
@@ -52,6 +60,8 @@ class Position:
     stop_price: float
     strategy: str
     last_price: float
+    highest_close: float = 0.0
+    target_price: float | None = None
 
     @property
     def market_value(self) -> float:
@@ -80,15 +90,38 @@ class ClosedTrade:
     exit_reason: str
 
 
+class BrokerAPI(Protocol):
+    """What the runner needs from any broker, paper or live."""
+    cash: float
+    positions: dict[str, Position]
+
+    @property
+    def pending_orders(self) -> list[Order]: ...
+    def pending_for(self, ticker: str) -> list[Order]: ...
+    def equity(self) -> float: ...
+    def reserved_cash(self) -> float: ...
+    def place_order(self, created_date: dt.date, ticker: str, side: str, qty: int, strategy: str,
+                    reason: str, max_notional: float | None = None,
+                    atr_at_signal: float | None = None) -> Order: ...
+    def mark(self, closes: dict[str, float]) -> None: ...
+    def drain_touched(self) -> list[Order]: ...
+
+
 @dataclass
 class PaperBroker:
     cash: float
-    cost_per_side: float
-    stop_loss_pct: float
+    cost_per_side: CostModel | float
+    stop_loss_pct: float = 5.0
+    exits: ExitRules | None = None
     positions: dict[str, Position] = field(default_factory=dict)
     orders: list[Order] = field(default_factory=list)  # history for this session + carried pending orders
     trades: list[ClosedTrade] = field(default_factory=list)
     _touched: dict[str, Order] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        self.costs = as_cost_model(self.cost_per_side)
+        if self.exits is None:
+            self.exits = ExitRules(stop_loss_pct=self.stop_loss_pct)
 
     # ----- queries -----
     @property
@@ -110,7 +143,8 @@ class PaperBroker:
 
     # ----- orders -----
     def place_order(self, created_date: dt.date, ticker: str, side: str, qty: int, strategy: str,
-                    reason: str, max_notional: float | None = None) -> Order:
+                    reason: str, max_notional: float | None = None,
+                    atr_at_signal: float | None = None) -> Order:
         if side not in (BUY, SELL):
             raise BrokerError(f"unknown side {side!r}")
         if qty < 1:
@@ -125,7 +159,7 @@ class PaperBroker:
                 raise BrokerError(f"cannot sell {ticker}: not held")
             qty = min(qty, pos.qty)
         order = Order(f"{created_date:%Y%m%d}-{ticker}-{side}", created_date, ticker, side, int(qty),
-                      strategy, reason, max_notional=max_notional)
+                      strategy, reason, max_notional=max_notional, atr_at_signal=atr_at_signal)
         self.orders.append(order)
         self._touch(order)
         return order
@@ -145,7 +179,7 @@ class PaperBroker:
         return done
 
     def _fill_buy(self, order: Order, day: dt.date, price: float) -> None:
-        unit = price * (1.0 + self.cost_per_side)
+        unit = self.costs.buy_unit_cost(price)
         qty = order.qty
         if order.max_notional:
             qty = min(qty, math.floor(order.max_notional / unit))
@@ -154,12 +188,13 @@ class PaperBroker:
             why = "already holding" if order.ticker in self.positions else "not enough cash at the open"
             self._finish(order, CANCELLED, day, note=f"Cancelled: {why}.")
             return
-        fees = qty * price * self.cost_per_side
+        fees = self.costs.fee(BUY, qty, price)
         self.cash -= qty * price + fees
         note = "" if qty == order.qty else f"Quantity cut from {order.qty} to {qty} to respect cash / size limits."
         order.qty = qty
         self.positions[order.ticker] = Position(
-            order.ticker, qty, day, price, fees, price * (1.0 - self.stop_loss_pct / 100.0), order.strategy, price
+            order.ticker, qty, day, price, fees, self.exits.initial_stop(price, order.atr_at_signal),
+            order.strategy, price, highest_close=price, target_price=self.exits.target(price),
         )
         self._finish(order, FILLED, day, price, fees, note)
 
@@ -173,28 +208,44 @@ class PaperBroker:
         self._finish(order, FILLED, day, price, trade.fees - pos.entry_fees)
 
     def check_stops(self, day: dt.date, opens: dict[str, float], lows: dict[str, float]) -> list[ClosedTrade]:
+        return self.check_exits(day, opens, {}, lows)
+
+    def check_exits(self, day: dt.date, opens: dict[str, float], highs: dict[str, float],
+                    lows: dict[str, float]) -> list[ClosedTrade]:
+        """Stop-loss / take-profit hits during `day` (see papertrader.exits)."""
         out = []
         for ticker, pos in list(self.positions.items()):
-            if ticker not in lows or lows[ticker] > pos.stop_price:
+            if ticker not in lows:
                 continue
-            price = min(float(opens.get(ticker, pos.stop_price)), pos.stop_price)
-            gap = price < pos.stop_price
-            trade = self._close(pos, day, price, "stop_loss")
-            order = Order(f"{day:%Y%m%d}-{ticker}-STOP", day, ticker, SELL, pos.qty, pos.strategy,
-                          f"Stop-loss: price fell to the stop level of Rs {pos.stop_price:,.2f}.")
+            open_ = float(opens.get(ticker, pos.stop_price))
+            hit = intraday_exit(open_, float(highs.get(ticker, 0.0)), float(lows[ticker]), pos.stop_price,
+                                pos.target_price if ticker in highs else None)
+            if hit is None:
+                continue
+            price, reason = hit
+            trade = self._close(pos, day, price, reason)
+            if reason == "stop_loss":
+                tag, why = "STOP", f"Stop-loss: price fell to the stop level of Rs {pos.stop_price:,.2f}."
+                note = "Gapped below the stop; sold at the open." if price < pos.stop_price else ""
+            else:
+                tag, why = "TARGET", f"Take-profit: price reached the target of Rs {pos.target_price:,.2f}."
+                note = "Gapped above the target; sold at the open." if price > pos.target_price else ""
+            order = Order(f"{day:%Y%m%d}-{ticker}-{tag}", day, ticker, SELL, pos.qty, pos.strategy, why)
             self.orders.append(order)
-            self._finish(order, FILLED, day, price, trade.fees - pos.entry_fees,
-                         "Gapped below the stop; sold at the open." if gap else "")
+            self._finish(order, FILLED, day, price, trade.fees - pos.entry_fees, note)
             out.append(trade)
         return out
 
     def mark(self, closes: dict[str, float]) -> None:
+        """Mark positions at the close and trail stops (the new stop applies from the next day)."""
         for ticker, pos in self.positions.items():
             if ticker in closes:
                 pos.last_price = float(closes[ticker])
+                pos.highest_close = max(pos.highest_close or pos.entry_price, pos.last_price)
+                pos.stop_price = self.exits.trail(pos.stop_price, pos.highest_close)
 
     def _close(self, pos: Position, day: dt.date, price: float, reason: str) -> ClosedTrade:
-        exit_fee = pos.qty * price * self.cost_per_side
+        exit_fee = self.costs.fee(SELL, pos.qty, price)
         self.cash += pos.qty * price - exit_fee
         gross = pos.qty * (price - pos.entry_price)
         fees = pos.entry_fees + exit_fee
@@ -233,8 +284,9 @@ class PaperBroker:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any], cost_per_side: float, stop_loss_pct: float) -> "PaperBroker":
-        b = cls(float(data["cash"]), cost_per_side, stop_loss_pct)
+    def from_dict(cls, data: dict[str, Any], cost_per_side: CostModel | float, stop_loss_pct: float,
+                  exits: ExitRules | None = None) -> "PaperBroker":
+        b = cls(float(data["cash"]), cost_per_side, stop_loss_pct, exits)
         for p in data.get("positions", []):
             p = {**p, "entry_date": _d(p["entry_date"])}
             b.positions[p["ticker"]] = Position(**p)

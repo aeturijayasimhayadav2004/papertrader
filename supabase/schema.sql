@@ -99,6 +99,9 @@ create table if not exists public.backtest_results (
     cagr double precision,
     max_drawdown double precision,
     sharpe double precision,
+    sortino double precision,
+    calmar double precision,
+    profit_factor double precision,
     win_rate double precision,
     n_trades integer,
     exposure double precision,
@@ -107,6 +110,12 @@ create table if not exists public.backtest_results (
     qualified boolean,
     overfit_flag boolean,
     rank integer,
-    note text
+    note text,
+    fold_win_rate double precision
 );
+-- Upgrades for databases created before these columns existed (safe to re-run).
+alter table public.backtest_results add column if not exists sortino double precision;
+alter table public.backtest_results add column if not exists calmar double precision;
+alter table public.backtest_results add column if not exists profit_factor double precision;
+alter table public.backtest_results add column if not exists fold_win_rate double precision;
 create index if not exists backtest_as_of_idx on public.backtest_results (as_of_date);

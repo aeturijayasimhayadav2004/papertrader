@@ -52,6 +52,10 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           PAPERTRADER_REQUIRE_SUPABASE: "1"
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Repo Settings -> Variables -> PAPERTRADER_KILL_SWITCH = 1 stops new buys without a code change.
+          PAPERTRADER_KILL_SWITCH: ${{ vars.PAPERTRADER_KILL_SWITCH }}
         run: python scripts/run_daily.py ${{ inputs.force && '--force' || '' }}
 
       - name: Save local state

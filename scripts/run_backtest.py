@@ -23,6 +23,7 @@ import pandas as pd  # noqa: E402
 from papertrader.config import PROJECT_ROOT, load_config  # noqa: E402
 from papertrader.data import load_prices  # noqa: E402
 from papertrader.logs import setup_logging  # noqa: E402
+from papertrader.metrics import monte_carlo  # noqa: E402
 from papertrader.selection import evaluate_strategies  # noqa: E402
 from papertrader.strategies import build_strategies  # noqa: E402
 
@@ -35,16 +36,21 @@ def main() -> int:
 
     cfg = load_config(args.config)
     setup_logging(cfg.log_dir)
-    prices, warnings = load_prices(cfg.universe, cfg.data, refresh=args.refresh)
+    loaded, warnings = load_prices(list(dict.fromkeys(cfg.universe + [cfg.benchmark])), cfg.data,
+                                   refresh=args.refresh)
+    prices = {t: df for t, df in loaded.items() if t in cfg.universe}
     if not prices:
         print("No price data available.", *warnings, sep="\n")
         return 1
     as_of = max(df.index[-1] for df in prices.values()).date()
-    selection = evaluate_strategies(build_strategies(cfg.strategies), prices, cfg, as_of)
+    selection = evaluate_strategies(build_strategies(cfg.strategies), prices, cfg, as_of,
+                                    benchmark=loaded.get(cfg.benchmark))
 
     print("\nPAPER TRADING BACKTEST - NO REAL MONEY")
-    print(f"Data up to {as_of}. Costs {cfg.costs.per_side_pct:g}% per side. "
-          f"Stop-loss in backtest: {'on' if cfg.backtest.apply_stop_loss else 'off'}.")
+    print(f"Data up to {as_of}. Costs: {cfg.costs.describe()}.")
+    print(f"Exits in backtest: {'on' if cfg.backtest.apply_stop_loss else 'off'} ({cfg.risk.exit_rules()}).")
+    print(f"Regime filter: {'on' if cfg.regime.enabled else 'off'}. Selection: {cfg.selection.method}, "
+          f"criterion {cfg.selection.criterion}.")
     for period, (s, e) in selection.periods.items():
         print(f"  {period:14s} {s} -> {e}")
 
@@ -52,17 +58,25 @@ def main() -> int:
     if rows.empty:
         print("\n" + selection.summary())
         return 0
-    show = rows[["strategy", "period", "total_return", "cagr", "max_drawdown", "sharpe", "win_rate",
-                 "n_trades", "exposure", "bh_return", "qualified", "overfit_flag"]].copy()
-    for col in ["total_return", "cagr", "max_drawdown", "win_rate", "exposure", "bh_return"]:
+    show = rows[["strategy", "period", "total_return", "cagr", "max_drawdown", "sharpe", "sortino", "calmar",
+                 "profit_factor", "win_rate", "n_trades", "exposure", "bh_return", "fold_win_rate",
+                 "qualified", "overfit_flag"]].copy()
+    for col in ["total_return", "cagr", "max_drawdown", "win_rate", "exposure", "bh_return", "fold_win_rate"]:
         show[col] = show[col].map(lambda v: "" if pd.isna(v) else f"{v:+.1%}")
-    show["sharpe"] = show["sharpe"].map(lambda v: f"{v:.2f}")
+    for col in ["sharpe", "sortino", "calmar", "profit_factor"]:
+        show[col] = show[col].map(lambda v: "" if pd.isna(v) else f"{v:.2f}")
     print("\n" + show.to_string(index=False))
 
     print("\nNotes:")
     for ev in selection.evaluations:
         flag = "QUALIFIED" if ev.qualified else "not selected"
         print(f"  - {ev.label} [{flag}{', OVERFIT WARNING' if ev.overfit_flag else ''}]: {' '.join(ev.notes)}")
+    print("\nMonte Carlo (2,000 resamples of out-of-sample trades, each on a 1/N sleeve):")
+    for ev in selection.evaluations:
+        mc = monte_carlo([t.return_pct for t in ev.out_of_sample.trades], fraction=1 / len(prices))
+        if mc:
+            print(f"  - {ev.label}: P(loss) {mc['prob_loss']:.0%}, 5th pct return {mc['return_p5']:+.1%}, "
+                  f"median {mc['return_p50']:+.1%}, bad-case drawdown {mc['max_drawdown_p95']:.1%}")
     print("\n" + selection.summary())
 
     out = PROJECT_ROOT / "reports"

@@ -3,10 +3,13 @@
 Timing rules (no lookahead):
   * The signal for bar t is computed from data up to and including bar t's close.
   * An order created from that signal fills at bar t+1's OPEN, never at bar t.
-  * Stop-loss is checked against each bar's low. If the bar opens below the stop
-    (a gap down) the exit is at the open, otherwise at the stop price.
-  * Costs are charged on every fill (per side), and open positions at the end of a
-    period are charged the exit cost so results are net of costs.
+  * Stops / targets follow papertrader.exits (the paper broker uses the same rules):
+    checked against each bar's low/high, gaps fill at the open, and a trailing
+    stop is raised at the close for use from the next bar.
+  * Costs come from papertrader.costs and are charged on every fill; open positions
+    at the end of a period are charged the exit cost so results are net of costs.
+  * An optional market-regime series blocks new entries on days it is False
+    (e.g. Nifty below its 200-day average); exits are never blocked.
 
 The portfolio is the universe split into equal-weight sleeves: each stock gets
 capital / N and is traded independently by the strategy. Buy-and-hold uses the
@@ -21,6 +24,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from papertrader.costs import BUY, SELL, CostModel, as_cost_model
+from papertrader.exits import ExitRules, intraday_exit
+from papertrader.indicators import atr, sma
 from papertrader.metrics import compute_metrics
 from papertrader.strategies.base import Signal, Strategy
 
@@ -34,7 +40,7 @@ class BacktestTrade:
     exit_date: pd.Timestamp
     exit_price: float
     return_pct: float  # net of costs on both sides, as a fraction
-    exit_reason: str  # "signal" | "stop_loss" | "end_of_period"
+    exit_reason: str  # "signal" | "stop_loss" | "take_profit" | "end_of_period"
 
 
 @dataclass
@@ -60,17 +66,29 @@ def _ts(d: dt.date | pd.Timestamp) -> pd.Timestamp:
     return pd.Timestamp(d)
 
 
+def market_regime(bench: pd.DataFrame | None, sma_window: int) -> pd.Series | None:
+    """True on days the benchmark closed above its `sma_window`-day average (causal)."""
+    if bench is None or bench.empty:
+        return None
+    close = bench["Close"]
+    return (close > sma(close, sma_window)).rename("regime_ok")
+
+
 def simulate_sleeve(
     df: pd.DataFrame,
     signals: pd.Series,
     start: dt.date,
     end: dt.date,
     capital: float,
-    cost: float,
+    cost: CostModel | float,
     stop_loss_pct: float | None = None,
     ticker: str = "",
+    exits: ExitRules | None = None,
+    regime: pd.Series | None = None,
 ) -> SleeveResult:
     """Trade one stock long-only with all of `capital`, following `signals`."""
+    cm = as_cost_model(cost)
+    rules = exits if exits is not None else ExitRules(stop_loss_pct=stop_loss_pct)
     period = df.loc[_ts(start):_ts(end)]
     n = len(period)
     dates = period.index
@@ -79,13 +97,18 @@ def simulate_sleeve(
         return SleeveResult(empty, empty.astype(bool), [])
 
     o = period["Open"].to_numpy(float)
+    hi = period["High"].to_numpy(float)
     lo = period["Low"].to_numpy(float)
     c = period["Close"].to_numpy(float)
     sig = signals.reindex(dates).fillna(Signal.HOLD.value).to_numpy()
-    sl = stop_loss_pct / 100.0 if stop_loss_pct else None
+    atr_now = (atr(df, rules.atr_period).reindex(dates).to_numpy(float) if rules.stop_mode == "atr"
+               else np.full(n, np.nan))
+    can_buy = (np.ones(n, dtype=bool) if regime is None
+               else regime.reindex(dates).ffill().fillna(False).to_numpy(bool))
 
     cash, qty = capital, 0.0
-    entry_price = entry_cost = stop = 0.0
+    entry_price = entry_cost = stop = highest = pending_atr = 0.0
+    target: float | None = None
     entry_date = signal_date = pending_signal_date = None
     pending: str | None = None
     equity = np.empty(n)
@@ -94,7 +117,7 @@ def simulate_sleeve(
 
     def exit_position(i: int, price: float, reason: str) -> None:
         nonlocal cash, qty
-        proceeds = qty * price * (1.0 - cost)
+        proceeds = qty * price - cm.fee(SELL, qty, price)
         cash += proceeds
         trades.append(BacktestTrade(ticker, signal_date, entry_date, entry_price, dates[i], price,
                                     proceeds / entry_cost - 1.0, reason))
@@ -104,23 +127,32 @@ def simulate_sleeve(
         # 1) fill the order queued at the previous close, at today's open
         if pending == Signal.BUY and qty == 0:
             entry_price = o[i]
-            qty = cash / (entry_price * (1.0 + cost))
-            entry_cost = qty * entry_price * (1.0 + cost)
+            qty = cm.max_qty(cash, entry_price)
+            entry_cost = qty * entry_price + cm.fee(BUY, qty, entry_price)
             cash -= entry_cost
             entry_date, signal_date = dates[i], pending_signal_date
-            stop = entry_price * (1.0 - sl) if sl else 0.0
+            stop = rules.initial_stop(entry_price, pending_atr)
+            target = rules.target(entry_price)
+            highest = entry_price
         elif pending == Signal.SELL and qty > 0:
             exit_position(i, o[i], "signal")
         pending = None
 
-        # 2) stop-loss during the day
-        if qty > 0 and sl and lo[i] <= stop:
-            exit_position(i, min(o[i], stop), "stop_loss")
+        # 2) stop-loss / take-profit during the day
+        if qty > 0:
+            hit = intraday_exit(o[i], hi[i], lo[i], stop, target)
+            if hit:
+                exit_position(i, *hit)
 
-        # 3) signal at the close -> order for tomorrow's open
+        # 3) trail the stop at the close (used from tomorrow)
+        if qty > 0:
+            highest = max(highest, c[i])
+            stop = rules.trail(stop, highest)
+
+        # 4) signal at the close -> order for tomorrow's open
         s = sig[i]
-        if qty == 0 and s == Signal.BUY:
-            pending, pending_signal_date = Signal.BUY, dates[i]
+        if qty == 0 and s == Signal.BUY and can_buy[i]:
+            pending, pending_signal_date, pending_atr = Signal.BUY, dates[i], atr_now[i]
         elif qty > 0 and s == Signal.SELL:
             pending = Signal.SELL
 
@@ -161,21 +193,24 @@ def run_backtest(
     start: dt.date,
     end: dt.date,
     capital: float,
-    cost: float,
+    cost: CostModel | float,
     stop_loss_pct: float | None = None,
+    exits: ExitRules | None = None,
+    regime: pd.Series | None = None,
 ) -> PortfolioResult:
     sleeve_capital = capital / len(prices)
     sleeves = []
     for ticker, df in prices.items():
         hist = df.loc[:_ts(end)]  # never let the strategy see bars after the period
         sleeves.append(simulate_sleeve(hist, strategy.signals(hist), start, end, sleeve_capital,
-                                       cost, stop_loss_pct, ticker))
+                                       cost, stop_loss_pct, ticker, exits, regime))
     return _combine(strategy.name, start, end, capital, sleeves, len(prices))
 
 
 def buy_and_hold(
-    prices: dict[str, pd.DataFrame], start: dt.date, end: dt.date, capital: float, cost: float
+    prices: dict[str, pd.DataFrame], start: dt.date, end: dt.date, capital: float, cost: CostModel | float
 ) -> PortfolioResult:
+    cm = as_cost_model(cost)
     sleeve_capital = capital / len(prices)
     sleeves = []
     for ticker, df in prices.items():
@@ -183,9 +218,9 @@ def buy_and_hold(
         if period.empty:
             continue
         o0, c_last = period["Open"].iloc[0], period["Close"].iloc[-1]
-        qty = sleeve_capital / (o0 * (1.0 + cost))
-        eq = qty * period["Close"]
-        eq.iloc[-1] -= qty * c_last * cost
+        qty = cm.max_qty(sleeve_capital, o0)
+        eq = qty * period["Close"] + (sleeve_capital - qty * o0 - cm.fee(BUY, qty, o0))
+        eq.iloc[-1] -= cm.fee(SELL, qty, c_last)
         trade = BacktestTrade(ticker, period.index[0], period.index[0], o0, period.index[-1], c_last,
                               float(eq.iloc[-1] / sleeve_capital - 1.0), "end_of_period")
         sleeves.append(SleeveResult(eq, pd.Series(True, index=period.index), [trade]))

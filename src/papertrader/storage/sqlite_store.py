@@ -29,6 +29,11 @@ class SQLiteStore:
             for table, (pk, cols) in TABLES.items():
                 body = ", ".join(f'"{c}" {t}{" PRIMARY KEY" if c == pk else ""}' for c, t in cols.items())
                 self.conn.execute(f'CREATE TABLE IF NOT EXISTS "{table}" ({body})')
+                # additive migration: older databases get new columns, nothing is dropped
+                have = {r[1] for r in self.conn.execute(f'PRAGMA table_info("{table}")')}
+                for c, t in cols.items():
+                    if c not in have:
+                        self.conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{c}" {t}')
             self.conn.execute("CREATE TABLE IF NOT EXISTS outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, "
                               "created_at TEXT, payload TEXT)")
 

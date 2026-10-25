@@ -52,7 +52,7 @@ class FixedSelection(Selection):
 
 
 def select_only(names):
-    return lambda strategies, prices, cfg, as_of: FixedSelection(as_of, names)
+    return lambda strategies, prices, cfg, as_of, **kw: FixedSelection(as_of, names)
 
 
 def price_loader(n_days):
@@ -68,9 +68,10 @@ def price_loader(n_days):
     return load
 
 
-def runner(cfg, store, n_days, strategies=None, selected=("always_buy",)):
+def runner(cfg, store, n_days, strategies=None, selected=("always_buy",), notifier=None):
     return DailyRunner(cfg, store, strategies or [AlwaysBuy(), Unselected()], price_loader(n_days),
-                       select_only(selected), now=dt.datetime(2024, 6, 1, 18, 0, tzinfo=IST))
+                       select_only(selected), now=dt.datetime(2024, 6, 1, 18, 0, tzinfo=IST),
+                       notifier=notifier or (lambda text: True))  # never message a real chat from tests
 
 
 def counts(store):
@@ -202,3 +203,42 @@ def test_supabase_schema_matches_python_schema():
         found = {line.strip().split()[0].strip('"') for line in body.splitlines()
                  if line.strip() and not line.strip().lower().startswith(("primary", "unique", "constraint", "--"))}
         assert found == set(cols), f"{table}: schema.sql {sorted(found ^ set(cols))} differ"
+
+
+def test_kill_switch_blocks_new_buys_only(cfg, monkeypatch):
+    store = Store(SQLiteStore(cfg.storage.sqlite_path))
+    monkeypatch.setenv("PAPERTRADER_KILL_SWITCH", "1")
+    runner(cfg, store, 10).run()
+    rows = {(r["ticker"], r["strategy"]): r for r in store.sqlite.rows("decisions")}
+    assert rows[("AAA.NS", "always_buy")]["action"] == "BLOCKED_BY_RISK"
+    assert "Kill switch" in rows[("AAA.NS", "always_buy")]["reason"]
+    assert store.sqlite.count("orders") == 0
+    snap = store.sqlite.rows("daily_snapshots")[-1]
+    assert snap["trading_halted"] and "Kill switch" in snap["halt_reason"]
+
+
+def test_regime_filter_blocks_buys_when_benchmark_trend_unknown_or_down(cfg):
+    import dataclasses
+
+    from papertrader.config import RegimeConfig
+
+    store = Store(SQLiteStore(cfg.storage.sqlite_path))
+    strict = dataclasses.replace(cfg, regime=RegimeConfig(enabled=True, sma_window=200))  # not enough history
+    runner(strict, store, 10).run()
+    assert store.sqlite.count("orders") == 0
+
+    store2 = Store(SQLiteStore(cfg.storage.sqlite_path.with_name("pt2.db")))
+    easy = dataclasses.replace(cfg, regime=RegimeConfig(enabled=True, sma_window=5))  # rising benchmark
+    runner(easy, store2, 10).run()
+    assert store2.sqlite.count("orders") == 2
+
+
+def test_notifier_gets_summary_and_state_keeps_history(cfg):
+    store = Store(SQLiteStore(cfg.storage.sqlite_path))
+    sent = []
+    runner(cfg, store, 10, notifier=lambda text: sent.append(text) or True).run()
+    runner(cfg, store, 12, notifier=lambda text: sent.append(text) or True).run()
+    assert len(sent) == 2 and "PAPER MONEY" in sent[0] and "BUY AAA.NS" in sent[0]
+    assert any("FILLED BUY" in line for line in sent[1].splitlines())
+    _, state = store.load_latest_state()
+    assert [e[0] for e in state["equity_history"]] == ["2024-01-12", "2024-01-15", "2024-01-16"]

@@ -84,6 +84,8 @@ $env:PAPERTRADER_DASHBOARD_SQLITE = "..\data\papertrader.db"; cd dashboard; stre
 1. Repo **Settings → Secrets and variables → Actions → New repository secret**:
    - `SUPABASE_URL`
    - `SUPABASE_SERVICE_KEY` (service_role / secret key)
+   - optional: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (run summaries on your phone)
+   - optional, under the **Variables** tab: `PAPERTRADER_KILL_SWITCH` = `1` stops new buys
 2. **Actions** tab → enable workflows if asked → **daily-paper-trade → Run workflow** (manual test).
 3. Green run → dashboard **Health** tab shows the new run time.
 
