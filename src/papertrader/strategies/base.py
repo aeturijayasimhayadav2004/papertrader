@@ -8,12 +8,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 import pandas as pd
 
 
-class Signal(str, Enum):
+class Signal(StrEnum):
     BUY = "BUY"
     SELL = "SELL"
     HOLD = "HOLD"

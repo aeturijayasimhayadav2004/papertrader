@@ -14,7 +14,7 @@ def test_ma_crossover_buys_on_the_cross_bar_only():
     closes = list(np.linspace(200, 100, 60)) + list(np.linspace(101, 220, 40))
     df = make_ohlc(closes)
     sig = MACrossover(5, 20).signals(df)
-    buys = sig[sig == Signal.BUY]
+    buys = sig[sig == Signal.BUY.value]  # .value: pandas' python-backed str dtype won't match the enum
     assert len(buys) == 1
     fast = df.Close.rolling(5).mean()
     slow = df.Close.rolling(20).mean()
@@ -33,7 +33,7 @@ def test_rsi_bounce_buys_when_rsi_recovers_above_30():
     closes = list(np.linspace(100, 60, 30)) + [62, 65, 68, 72]
     df = make_ohlc(closes)
     fr = RSIBounce(14, 30, 70).frame(df)
-    buys = fr[fr.signal == Signal.BUY]
+    buys = fr[fr.signal == Signal.BUY.value]
     assert len(buys) >= 1
     row = buys.iloc[0]
     assert row.rsi >= 30 > row.rsi_prev
@@ -69,3 +69,10 @@ def test_build_strategies_respects_enabled_flag():
     assert [x.name for x in s] == ["breakout"]
     with pytest.raises(ValueError):
         build_strategies({"nope": {}})
+
+
+def test_signal_compares_equal_on_every_pandas_string_backend():
+    # CI has no pyarrow, so pandas uses its pure-Python string storage, which compares via str(other).
+    s = pd.Series(["BUY", "HOLD"], dtype=pd.StringDtype("python", na_value=np.nan))
+    assert (s == Signal.BUY).tolist() == [True, False]
+    assert str(Signal.SELL) == "SELL"
