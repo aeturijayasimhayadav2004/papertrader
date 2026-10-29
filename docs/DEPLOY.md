@@ -20,7 +20,7 @@ Three pieces:
    ```sql
    select tablename, policyname, cmd, roles from pg_policies where schemaname = 'public';
    ```
-   Expect 7 rows, all `SELECT`.
+   Expect 9 rows, all `SELECT`.
 4. **Project Settings → API (or API Keys)**, note:
    - Project URL → `SUPABASE_URL`
    - `service_role` key (newer projects: a **secret** key, `sb_secret_...`) → bot only

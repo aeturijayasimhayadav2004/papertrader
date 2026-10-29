@@ -29,6 +29,12 @@ No broker, no broker API keys, no real orders.
 9. **Daily runner** (`runner.py`, `scripts/run_daily.py`): processes every new completed trading day,
    logs every decision with its reason, writes to SQLite + Supabase, sends a Telegram summary if configured.
 10. **Dashboard** (`dashboard/`): Streamlit, read-only Supabase key, password-gated.
+11. **Trading agent** (`src/papertrader/agent/`): a team of desks asked before every buy:
+    results-calendar blackout, news, insider / bulk-deal activity, and the signal's own past odds on that
+    stock. A BLOCK skips the buy. It also runs a daily Nifty 50 chart scan, and offers on-demand intraday tools
+    (opening-range entry timer, exit planner, 10,000-path time machine, sizing, risk check, paper tickets
+    that need your exact "yes", alerts) through `scripts/agent.py` and the Claude Code skills
+    `/nse-scanner`, `/nse-news`, `/nse-agent`, and others. See [docs/AGENT.md](docs/AGENT.md).
 
 Where these techniques came from, and the gated plan for moving to a real broker later:
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

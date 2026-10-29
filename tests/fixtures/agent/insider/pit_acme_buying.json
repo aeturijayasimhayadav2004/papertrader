@@ -1,0 +1,5 @@
+{"acqNameList":["Acme Promoter Holdings Pvt Ltd"],
+ "data":[
+  {"symbol":"ACME","company":"Acme Infra Limited","anex":"7(2)","acqName":"Acme Promoter Holdings Pvt Ltd","date":"26-Oct-2026 19:05","secType":"Equity Shares","secAcq":"250000","tdpTransactionType":"Buy","personCategory":"Promoters","secVal":"12000000","acqfromDt":"22-Oct-2026","acqtoDt":"22-Oct-2026","intimDt":"26-Oct-2026","acqMode":"Market Purchase","exchange":"NSE","remarks":"-"},
+  {"symbol":"ACME","company":"Acme Infra Limited","anex":"7(2)","acqName":"S Mehta","date":"21-Oct-2026 19:05","secType":"Equity Shares","secAcq":"50000","tdpTransactionType":"Buy","personCategory":"Key Managerial Personnel","secVal":"0","acqfromDt":"19-Oct-2026","acqtoDt":"19-Oct-2026","intimDt":"21-Oct-2026","acqMode":"ESOP","exchange":"NSE","remarks":"-"}
+ ]}

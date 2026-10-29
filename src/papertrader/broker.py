@@ -194,7 +194,7 @@ class PaperBroker:
         order.qty = qty
         self.positions[order.ticker] = Position(
             order.ticker, qty, day, price, fees, self.exits.initial_stop(price, order.atr_at_signal),
-            order.strategy, price, highest_close=price, target_price=self.exits.target(price),
+            order.strategy, price, highest_close=price, target_price=self.exits.target(price, order.atr_at_signal),
         )
         self._finish(order, FILLED, day, price, fees, note)
 

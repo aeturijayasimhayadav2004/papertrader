@@ -53,9 +53,19 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
         "excess_return": "REAL", "qualified": "INTEGER", "overfit_flag": "INTEGER", "rank": "INTEGER",
         "note": "TEXT",
     }),
+    # trading agent: one brief per buy candidate (all desks' findings + verdict)
+    "agent_briefs": ("id", {
+        "id": "TEXT", "as_of_date": "TEXT", "ticker": "TEXT", "strategy": "TEXT", "verdict": "TEXT",
+        "summary": "TEXT", "findings": "TEXT", "created_at": "TEXT",
+    }),
+    # trading agent: daily chart scan of the wider universe
+    "agent_scans": ("id", {
+        "id": "TEXT", "as_of_date": "TEXT", "ticker": "TEXT", "setup": "TEXT", "close_price": "REAL",
+        "score": "REAL", "detail": "TEXT", "created_at": "TEXT",
+    }),
 }
 
-JSON_COLUMNS = {"daily_snapshots": {"selected_strategies", "state_json"}}
+JSON_COLUMNS = {"daily_snapshots": {"selected_strategies", "state_json"}, "agent_briefs": {"findings"}}
 BOOL_COLUMNS = {"daily_snapshots": {"trading_halted"}, "backtest_results": {"qualified", "overfit_flag"}}
 
 

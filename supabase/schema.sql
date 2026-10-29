@@ -119,3 +119,29 @@ alter table public.backtest_results add column if not exists calmar double preci
 alter table public.backtest_results add column if not exists profit_factor double precision;
 alter table public.backtest_results add column if not exists fold_win_rate double precision;
 create index if not exists backtest_as_of_idx on public.backtest_results (as_of_date);
+
+-- Trading agent: one brief per buy candidate (every desk's finding + the verdict).
+create table if not exists public.agent_briefs (
+    id text primary key,
+    as_of_date date not null,
+    ticker text not null,
+    strategy text,
+    verdict text,
+    summary text,
+    findings jsonb,
+    created_at timestamptz
+);
+create index if not exists agent_briefs_as_of_idx on public.agent_briefs (as_of_date);
+
+-- Trading agent: daily chart scan of the wider universe (Nifty 50 by default).
+create table if not exists public.agent_scans (
+    id text primary key,
+    as_of_date date not null,
+    ticker text not null,
+    setup text not null,
+    close_price double precision,
+    score double precision,
+    detail text,
+    created_at timestamptz
+);
+create index if not exists agent_scans_as_of_idx on public.agent_scans (as_of_date);

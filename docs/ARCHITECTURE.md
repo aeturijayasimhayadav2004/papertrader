@@ -27,6 +27,7 @@ their terms.
 | Pre-trade risk checks: order-rate cap, price-jump / bad-data guard | NautilusTrader RiskEngine, Hummingbot | `risk.py`, `runner._data_sanity` |
 | Operator kill switch | Freqtrade `/stopentry`, Hummingbot kill switch | env `PAPERTRADER_KILL_SWITCH`, file `KILL_SWITCH`, GitHub repo variable |
 | Telegram alerts | Freqtrade Telegram bot | `notify.py` |
+| Desk-based agent: scanner, news, results blackout, insider deals, entry timer, R-multiple exits, session time machine, budget, risk PASS/BLOCK, approval-gated tickets, alerts | day-trader-skill (Claude skill pack, US), rebuilt for NSE | `agent/`, `scripts/agent.py`, `.claude/skills/nse-*`, [AGENT.md](AGENT.md) |
 
 Not adopted, on purpose: hyper-parameter optimisation on the selection data (it would
 make the out-of-sample numbers meaningless), intraday/HFT features (the data is daily
@@ -40,6 +41,8 @@ data.py (Yahoo daily bars, cached)
 strategies/*  ──► signals (BUY/SELL/HOLD + reason), causal, lookahead-tested
    │
 selection.py  ──► which strategies may trade (holdout or walk-forward vs buy-and-hold)
+   │
+agent/        ──► desks brief every buy candidate (events, news, insider, odds); BLOCK skips it
    │
 runner.py     ──► per day: fills → exits → mark/trail → buy blockers → decisions → persist
    │   uses: risk.py (size, limits) · protections.py · exits.py · costs.py

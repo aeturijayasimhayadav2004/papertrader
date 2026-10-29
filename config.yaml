@@ -93,6 +93,7 @@ risk:
   atr_multiple: 2.5
   trailing_stop_pct: null   # e.g. 8 = stop trails 8% below the highest close since entry
   take_profit_pct: null     # e.g. 20 = sell when the high reaches +20%
+  take_profit_r: null       # e.g. 2 = sell at entry + 2 x the stop distance (the nearer target wins)
   sizing: fixed_pct         # fixed_pct | risk_based (lose ~risk_per_trade_pct of equity if stopped out)
   risk_per_trade_pct: 1
   max_open_positions: 5
@@ -121,6 +122,21 @@ protections:                # circuit breakers (Freqtrade-style); they only bloc
 trading:
   mode: paper               # only paper is implemented (see docs/ARCHITECTURE.md for the live plan)
   kill_switch_file: KILL_SWITCH   # create this file (or set PAPERTRADER_KILL_SWITCH=1) to stop new buys
+
+agent:                      # the trading agent's desks, asked about every buy candidate (see docs/AGENT.md)
+  enabled: true
+  desks: [events, news, insider, odds]   # also available: analyst (quarterly results, information only)
+  block_on_unknown: false   # true = a desk that cannot reach its data blocks the buy
+  results_days_before: 2    # results blackout: no new buy 2 trading days before a results board meeting ...
+  results_days_after: 1     # ... or 1 day after it
+  news_hours: 48            # headlines window
+  insider_days: 30          # insider (SEBI PIT) trades and bulk / block deals window
+  odds_min_signals: 8       # the odds desk replays this strategy's past signals on this stock;
+  odds_min_win_rate: 0.40   # with >= 8 of them, it blocks if win rate < 40% or average trade <= 0
+  odds_lookback_days: 1500
+  scan_universe: nifty50    # daily chart scan: none | config | nifty50 | nifty100 | nifty500
+  scan_history_days: 400
+  scan_top_n: 25
 
 notify:
   telegram: true            # sends only if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are set

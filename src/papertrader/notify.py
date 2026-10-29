@@ -27,6 +27,14 @@ def format_summary(summary: Any) -> str:
         lines.append(f"... and {len(acted) - 15} more orders.")
     for e in getattr(summary, "events", [])[:15]:
         lines.append(f"* {e}")
+    briefs = getattr(summary, "briefs", [])
+    if briefs:
+        lines.append("Agent briefs:")
+        lines += [f"- {b[:300]}" for b in briefs[:8]]
+    scan = getattr(summary, "scan", [])
+    if scan:
+        lines.append("Chart scan (information only):")
+        lines += [f"- {h}" for h in scan[:8]]
     return "\n".join(lines)[:MAX_LEN]
 
 

@@ -3,7 +3,10 @@
 `flat`: one percentage per side (brokerage + taxes + slippage lumped together).
 `india_delivery`: NSE equity delivery charges itemised the way Indian contract
 notes show them (STT, exchange fee, SEBI fee, stamp duty, GST, DP charge), plus
-a slippage allowance. Rates are config values because they change with budgets
+a slippage allowance.
+`india_intraday`: NSE equity intraday (MIS) charges: brokerage 0.03% capped at
+Rs 20 per order, STT 0.025% on the sell only, stamp duty 0.003% on the buy
+only, no DP charge. Rates are config values because they change with budgets
 and broker plans; check your broker's charges page before going live.
 
 Fill prices are never adjusted: slippage is charged as a cost, so the backtester
@@ -80,6 +83,32 @@ def india_delivery(
         brokerage_cap=brokerage_cap,
         gst=gst,
         label="NSE delivery (itemised)",
+    )
+
+
+def india_intraday(
+    *,
+    brokerage_pct: float = 0.03,
+    brokerage_cap: float | None = 20.0,
+    stt_sell_pct: float = 0.025,
+    exchange_pct: float = 0.00297,
+    sebi_per_crore: float = 10.0,
+    stamp_buy_pct: float = 0.003,
+    gst_pct: float = 18.0,
+    slippage_pct: float = 0.05,
+) -> CostModel:
+    """NSE equity intraday (MIS). STT and stamp duty are one-sided, so the buy and sell
+    rates differ; GST (18%) applies to brokerage, exchange and SEBI fees. No DP charge
+    because nothing is delivered to the demat account."""
+    gst = gst_pct / 100.0
+    common = (exchange_pct / 100.0 + sebi_per_crore / 1e7) * (1.0 + gst) + slippage_pct / 100.0
+    return CostModel(
+        buy_rate=common + stamp_buy_pct / 100.0,
+        sell_rate=common + stt_sell_pct / 100.0,
+        brokerage_rate=brokerage_pct / 100.0,
+        brokerage_cap=brokerage_cap,
+        gst=gst,
+        label="NSE intraday MIS (itemised)",
     )
 
 

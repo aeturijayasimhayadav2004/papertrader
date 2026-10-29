@@ -1,0 +1,5 @@
+{"as_on_date":"29-Oct-2026","BULK_DEALS":"2","BLOCK_DEALS":"1","SHORT_DEALS":"0",
+ "BULK_DEALS_DATA":[{"date":"29-Oct-2026","symbol":"ACME","name":"Acme Infra Limited","clientName":"XYZ FUND","buySell":"BUY","qty":"900000","watp":"47.50","remarks":"-"},
+                    {"date":"29-Oct-2026","symbol":"OTHER","name":"Other Ltd","clientName":"ABC LLP","buySell":"SELL","qty":"100","watp":"10.00","remarks":"-"}],
+ "BLOCK_DEALS_DATA":[{"date":"29-Oct-2026","symbol":"ACME","name":"Acme Infra Limited","clientName":"PQR MF","buySell":"SELL","qty":"200000","watp":"47.60","remarks":"-"}],
+ "SHORT_DEALS_DATA":[]}

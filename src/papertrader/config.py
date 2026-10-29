@@ -110,6 +110,7 @@ class RiskConfig:
     atr_multiple: float = 2.5
     trailing_stop_pct: float | None = None
     take_profit_pct: float | None = None
+    take_profit_r: float | None = None       # target = entry + R x (entry - initial stop)
     sizing: str = "fixed_pct"                # fixed_pct | risk_based
     risk_per_trade_pct: float = 1.0
     max_new_orders_per_day: int = 5
@@ -117,7 +118,7 @@ class RiskConfig:
 
     def exit_rules(self) -> ExitRules:
         return ExitRules(self.stop_loss_pct, self.stop_mode, self.atr_multiple, self.trailing_stop_pct,
-                         self.take_profit_pct, self.atr_period)
+                         self.take_profit_pct, self.atr_period, take_profit_r=self.take_profit_r)
 
 
 @dataclass(frozen=True)
@@ -151,6 +152,29 @@ class NotifyConfig:
     telegram: bool = True                    # sends only when TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID are set
 
 
+AGENT_DESKS = ("events", "news", "insider", "analyst", "odds")
+
+
+@dataclass(frozen=True)
+class AgentConfig:
+    """The trading agent's desks. Each listed desk is asked about every buy candidate;
+    a BLOCK finding stops that buy. A desk whose data is unreachable reports
+    "unknown", which blocks only when block_on_unknown is true."""
+    enabled: bool = False
+    desks: tuple[str, ...] = ("events", "news", "insider", "odds")
+    block_on_unknown: bool = False
+    results_days_before: int = 2             # no new buy this many trading days before a results meeting ...
+    results_days_after: int = 1              # ... or this many after it
+    news_hours: int = 48
+    insider_days: int = 30
+    odds_min_signals: int = 8                # past signals needed before the odds desk can block
+    odds_min_win_rate: float = 0.40
+    odds_lookback_days: int = 1500
+    scan_universe: str = "nifty50"           # none | config | nifty50 | nifty100 | nifty500
+    scan_history_days: int = 400
+    scan_top_n: int = 25
+
+
 @dataclass(frozen=True)
 class StorageConfig:
     sqlite_path: Path
@@ -175,6 +199,7 @@ class Config:
     protections: ProtectionConfig = field(default_factory=ProtectionConfig)
     trading: TradingConfig = field(default_factory=TradingConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
+    agent: AgentConfig = field(default_factory=AgentConfig)
 
 
 def load_config(path: str | Path | None = None) -> Config:
@@ -253,6 +278,7 @@ def parse_config(raw: dict[str, Any]) -> Config:
         atr_multiple=float(r.get("atr_multiple", 2.5)),
         trailing_stop_pct=_opt_positive(r.get("trailing_stop_pct"), "risk.trailing_stop_pct"),
         take_profit_pct=_opt_positive(r.get("take_profit_pct"), "risk.take_profit_pct"),
+        take_profit_r=_opt_positive(r.get("take_profit_r"), "risk.take_profit_r"),
         sizing=str(r.get("sizing", "fixed_pct")),
         risk_per_trade_pct=_positive(r.get("risk_per_trade_pct", 1.0), "risk.risk_per_trade_pct"),
         max_new_orders_per_day=int(_positive(r.get("max_new_orders_per_day", 5), "risk.max_new_orders_per_day")),
@@ -292,6 +318,30 @@ def parse_config(raw: dict[str, Any]) -> Config:
                           "reconciliation and shadow-mode steps in docs/ARCHITECTURE.md first.")
     notify = NotifyConfig(telegram=bool((raw.get("notify") or {}).get("telegram", True)))
 
+    ag = raw.get("agent") or {}
+    agent = AgentConfig(
+        enabled=bool(ag.get("enabled", False)),
+        desks=tuple(str(x) for x in ag.get("desks", AgentConfig.desks)),
+        block_on_unknown=bool(ag.get("block_on_unknown", False)),
+        results_days_before=int(ag.get("results_days_before", 2)),
+        results_days_after=int(ag.get("results_days_after", 1)),
+        news_hours=int(ag.get("news_hours", 48)),
+        insider_days=int(ag.get("insider_days", 30)),
+        odds_min_signals=int(ag.get("odds_min_signals", 8)),
+        odds_min_win_rate=float(ag.get("odds_min_win_rate", 0.40)),
+        odds_lookback_days=int(ag.get("odds_lookback_days", 1500)),
+        scan_universe=str(ag.get("scan_universe", "nifty50")),
+        scan_history_days=int(ag.get("scan_history_days", 400)),
+        scan_top_n=int(ag.get("scan_top_n", 25)),
+    )
+    bad = set(agent.desks) - set(AGENT_DESKS)
+    if bad:
+        raise ConfigError(f"agent.desks: unknown desk(s) {sorted(bad)}; choose from {list(AGENT_DESKS)}")
+    if agent.scan_universe not in ("none", "config", "nifty50", "nifty100", "nifty500"):
+        raise ConfigError("agent.scan_universe must be none, config, nifty50, nifty100 or nifty500")
+    if not 0 <= agent.odds_min_win_rate <= 1:
+        raise ConfigError("agent.odds_min_win_rate must be between 0 and 1")
+
     storage = StorageConfig(
         sqlite_path=_path(st.get("sqlite_path", "data/papertrader.db")),
         use_supabase=bool(st.get("use_supabase", True)),
@@ -315,4 +365,5 @@ def parse_config(raw: dict[str, Any]) -> Config:
         protections=protections,
         trading=trading,
         notify=notify,
+        agent=agent,
     )

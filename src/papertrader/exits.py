@@ -6,8 +6,10 @@
   * Trailing stop (optional): after each close the stop is raised to
     `trailing_pct` below the highest close since entry. It never moves down
     and takes effect from the next bar.
-  * Take profit (optional): exit when the high reaches `take_profit_pct` above
-    the fill.
+  * Take profit (optional): exit when the high reaches the target. The target
+    is `take_profit_pct` above the fill, or `take_profit_r` times the initial
+    risk above the fill (fill + R x (fill - initial stop)). With both set, the
+    nearer target is used (take the profit at whichever comes first).
   * Intraday order on a daily bar is unknown, so when the stop and the target
     are both inside one bar we assume the stop hit first (the pessimistic case).
     Gaps fill at the open.
@@ -26,6 +28,7 @@ class ExitRules:
     trailing_pct: float | None = None
     take_profit_pct: float | None = None
     atr_period: int = 14
+    take_profit_r: float | None = None  # target in multiples of the initial risk
 
     def initial_stop(self, fill_price: float, atr_at_signal: float | None = None) -> float:
         if not self.stop_loss_pct:
@@ -40,8 +43,17 @@ class ExitRules:
         stop = self.initial_stop(price, atr_at_signal)
         return price - stop if stop else price * 0.10
 
-    def target(self, fill_price: float) -> float | None:
-        return fill_price * (1.0 + self.take_profit_pct / 100.0) if self.take_profit_pct else None
+    def target(self, fill_price: float, atr_at_signal: float | None = None) -> float | None:
+        """Take-profit price, or None. Pass the same ATR as for the stop so an R target
+        is measured from the real initial stop."""
+        targets = []
+        if self.take_profit_pct:
+            targets.append(fill_price * (1.0 + self.take_profit_pct / 100.0))
+        if self.take_profit_r:
+            stop = self.initial_stop(fill_price, atr_at_signal)
+            if 0 < stop < fill_price:  # no stop -> no risk to measure R from
+                targets.append(fill_price + self.take_profit_r * (fill_price - stop))
+        return min(targets) if targets else None
 
     def trail(self, stop: float, highest_close: float) -> float:
         if not self.trailing_pct:

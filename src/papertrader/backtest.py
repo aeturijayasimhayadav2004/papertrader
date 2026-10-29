@@ -132,7 +132,7 @@ def simulate_sleeve(
             cash -= entry_cost
             entry_date, signal_date = dates[i], pending_signal_date
             stop = rules.initial_stop(entry_price, pending_atr)
-            target = rules.target(entry_price)
+            target = rules.target(entry_price, pending_atr)
             highest = entry_price
         elif pending == Signal.SELL and qty > 0:
             exit_position(i, o[i], "signal")

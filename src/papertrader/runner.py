@@ -8,9 +8,16 @@ For each new trading day D (in order):
   5. Work out what blocks new buys: daily loss halt, kill switch, protections
      (stop-loss guard, drawdown, cooldown, low-profit lock), market regime and
      data sanity. Exits are never blocked.
-  6. Ask every strategy about every stock at D's close; apply risk rules;
-     queue orders for the next open. Every decision is logged with its reason.
-  7. Save decisions, orders, trades, positions and a snapshot (with full state).
+  6. Ask every strategy about every stock at D's close. For a BUY that nothing
+     above blocked, the trading agent's desks (results calendar, news, insider
+     deals, the signal's past odds) write a brief; a BLOCK verdict skips the buy.
+     Then risk rules size it and an order is queued for the next open. Every
+     decision is logged with its reason.
+  7. Save decisions, orders, trades, positions, agent briefs and a snapshot.
+  8. After the last day: the agent's chart scan of the wider universe.
+
+The agent desks read live news and filings, so they only run for the most
+recent day; catch-up days (missed runs) trade on the strategy rules alone.
 
 Re-running is safe: state is loaded from the latest saved snapshot, so a day that
 was already processed is skipped (or, with force=True, recomputed from the
@@ -61,6 +68,8 @@ class RunSummary:
     days_processed: list[dt.date] = field(default_factory=list)
     decisions: list[dict[str, Any]] = field(default_factory=list)
     events: list[str] = field(default_factory=list)  # fills, stops, halts: for notifications
+    briefs: list[str] = field(default_factory=list)  # agent briefs, one line each
+    scan: list[str] = field(default_factory=list)    # top chart-scan setups
 
 
 class DailyRunner:
@@ -73,6 +82,8 @@ class DailyRunner:
         selector: Selector = evaluate_strategies,
         now: dt.datetime | None = None,
         notifier: Notifier | None = None,
+        coordinator: Any = None,
+        scanner: Callable[..., list[dict[str, Any]]] | None = None,
     ):
         self.cfg = cfg
         self.store = store
@@ -86,6 +97,14 @@ class DailyRunner:
         self.exits = cfg.risk.exit_rules()
         self.risk = RiskManager(cfg.risk, self.costs)
         self.notifier = notifier if notifier is not None else (send_telegram if cfg.notify.telegram else None)
+        if coordinator is None and cfg.agent.enabled:
+            from papertrader.agent.orchestrator import Coordinator
+
+            coordinator = Coordinator(cfg.agent, self.costs, self.exits)
+        self.coordinator = coordinator
+        self.scanner = scanner
+        self._agent_live = False
+        self._briefs: list[Any] = []
 
     def kill_switch(self) -> str:
         """Reason new buys are switched off by the operator, or ''."""
@@ -170,11 +189,16 @@ class DailyRunner:
             return
 
         for day in days:
+            self._agent_live = self.coordinator is not None and day == days[-1]
             ops, selection_state, prev_equity, decisions = self._process_day(
                 day, universe, bench, broker, selection_state, prev_equity, history_state, summary.events)
             self.store.write(ops)
             summary.days_processed.append(day.date())
             summary.decisions = decisions
+
+        summary.briefs = [f"{b.ticker} {b.strategy}: {b.summary()}" for b in self._briefs]
+        if self.cfg.agent.enabled and self.cfg.agent.scan_universe != "none":
+            summary.scan = self._scan(last_bar, universe)
 
         n_trades = sum(1 for d in summary.decisions if d["action"] in (A_BUY, A_SELL))
         summary.status = "ok"
@@ -249,8 +273,10 @@ class DailyRunner:
         if bench_hist is not None and len(bench_hist):
             bench_close = float(bench_hist["Close"].iloc[-1])
         state = {"broker": broker.to_dict(), "selection": selection_state, "equity": equity, **history_state}
+        day_briefs = [b for b in self._briefs if b.as_of_date == d]
         ops += [
             upsert("decisions", decisions),
+            upsert("agent_briefs", [b.to_row() for b in day_briefs]),
             upsert("orders", [self._order_row(o) for o in broker.drain_touched()]),
             upsert("trades", [vars(t) for t in trades_today]),
             replace("positions", [self._position_row(p, d) for p in broker.positions.values()]),
@@ -265,6 +291,28 @@ class DailyRunner:
             }]),
         ]
         return ops, selection_state, equity, decisions
+
+    def _scan(self, d: dt.date, universe: dict[str, pd.DataFrame]) -> list[str]:
+        """Agent chart scan of the wider universe on the latest day. Never fails the run."""
+        try:
+            scanner = self.scanner
+            if scanner is None:
+                from papertrader.agent.scan_job import run_scan as scanner
+            hits = scanner(self.cfg, d, universe, now=self.now)
+        except Exception as exc:
+            log.warning("Agent chart scan skipped: %s", exc)
+            return []
+        top = hits[: self.cfg.agent.scan_top_n]
+        now = dt.datetime.now(dt.timezone.utc)
+        try:
+            self.store.write([upsert("agent_scans", [{
+                "id": f"{d}|{h['ticker']}|{h['setup']}", "as_of_date": d, "ticker": h["ticker"],
+                "setup": h["setup"], "close_price": h.get("close"), "score": h.get("score"),
+                "detail": str(h.get("detail", ""))[:1000], "created_at": now} for h in top])])
+        except Exception as exc:
+            log.warning("Could not save the chart scan: %s", exc)
+        log.info("Agent chart scan: %d setups on %s.", len(hits), d)
+        return [f"{h['ticker']} {h['setup']}: {h.get('detail', '')}"[:200] for h in top[:8]]
 
     def _rerank_due(self, selection_state: dict | None, d: dt.date) -> bool:
         if not selection_state:
@@ -350,9 +398,14 @@ class DailyRunner:
                             f"Already holding this stock, managed by {manager}. This strategy's view: {why}", close)
                 elif strat.name not in rank:
                     if sig == Signal.BUY:
+                        note = ""
+                        if self._agent_live:
+                            b = self.coordinator.brief(d, ticker, strat, history[ticker], info_only=True)
+                            self._briefs.append(b)
+                            note = f" {b.summary()}"
                         add(ticker, strat.name, sig.value, A_NOT_SELECTED,
                             f"{why} Not acting: this strategy did not beat buy-and-hold out-of-sample, "
-                            "so it is not allowed to trade.", close)
+                            f"so it is not allowed to trade.{note}", close)
                     else:
                         add(ticker, strat.name, sig.value, A_HOLD, f"{why} (Strategy not selected for trading.)", close)
                 elif sig == Signal.BUY:
@@ -365,6 +418,15 @@ class DailyRunner:
                     if blocked:
                         add(ticker, strat.name, sig.value, A_BLOCKED, f"{why} Blocked: {blocked}", close)
                         continue
+                    agent_note = ""
+                    if self._agent_live:
+                        b = self.coordinator.brief(d, ticker, strat, history[ticker])
+                        self._briefs.append(b)
+                        if b.blocked:
+                            add(ticker, strat.name, sig.value, A_BLOCKED, f"{why} Blocked by the agent: {b.reason()}",
+                                close)
+                            continue
+                        agent_note = f" {b.summary()}"
                     atr_now = self._atr(history[ticker])
                     rd = self.risk.check_new_position(
                         price=close, equity=equity, cash_available=broker.cash - broker.reserved_cash(),
@@ -381,7 +443,8 @@ class DailyRunner:
                         continue
                     pending_buys += 1
                     orders_today += 1
-                    add(ticker, strat.name, sig.value, A_BUY, f"{why} {rd.reason} Order fills at the next open.", close)
+                    add(ticker, strat.name, sig.value, A_BUY,
+                        f"{why} {rd.reason} Order fills at the next open.{agent_note}", close)
                 elif sig == Signal.SELL:
                     add(ticker, strat.name, sig.value, A_HOLD, f"{why} Not holding this stock, so nothing to sell.", close)
                 else:

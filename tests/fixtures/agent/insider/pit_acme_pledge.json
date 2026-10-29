@@ -1,0 +1,4 @@
+{"acqNameList":["Acme Promoter Holdings Pvt Ltd"],
+ "data":[
+  {"symbol":"ACME","company":"Acme Infra Limited","anex":"7(2)","acqName":"Acme Promoter Holdings Pvt Ltd","date":"28-Oct-2026 19:05","secType":"Equity Shares","secAcq":"4000000","tdpTransactionType":"Pledge Creation","personCategory":"Promoter Group","secVal":"192000000","acqfromDt":"26-Oct-2026","acqtoDt":"26-Oct-2026","intimDt":"28-Oct-2026","acqMode":"Pledge Creation","exchange":"NSE","remarks":"Pledged with XYZ NBFC for loan to group company"}
+ ]}

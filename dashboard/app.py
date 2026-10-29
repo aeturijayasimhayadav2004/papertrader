@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hmac
+import json
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -268,6 +269,49 @@ def strategies() -> None:
     st.plotly_chart(fig, width="stretch")
 
 
+def agent() -> None:
+    st.subheader("Trading agent")
+    st.markdown("Before any buy, the agent's desks check the stock: **events** (results board meeting "
+                "within days), **news** (fraud, regulator action, downgrades), **insider** (promoter selling, "
+                "bulk / block deals) and **odds** (how this strategy's past signals on this stock turned out). "
+                "A BLOCK verdict skips the buy. PAPER MONEY ONLY.")
+    try:
+        briefs = db.load("agent_briefs", order="as_of_date", desc=True, limit=200)
+        scans = db.load("agent_scans", order="as_of_date", desc=True, limit=300)
+    except Exception as exc:  # tables not created yet (run supabase/schema.sql)
+        st.warning(f"Agent tables not available yet: {exc}")
+        return
+
+    st.markdown("#### Briefs")
+    if briefs.empty:
+        st.info("No briefs yet: the agent writes one when a strategy says BUY.")
+    else:
+        icon = {"GO": "🟢", "CAUTION": "🟠", "BLOCK": "🔴"}
+        for _, b in briefs.head(30).iterrows():
+            findings = b.get("findings")
+            if isinstance(findings, str):
+                findings = json.loads(findings or "[]")
+            head = f"{icon.get(b['verdict'], '')} **{b['ticker']}** ({b['strategy']}) - {b['verdict']} - {b['as_of_date']}"
+            with st.expander(head, expanded=b["as_of_date"] == briefs["as_of_date"].iloc[0]):
+                st.write(b["summary"])
+                if findings:
+                    st.dataframe(pd.DataFrame(findings)[["desk", "status", "summary"]], hide_index=True,
+                                 width="stretch",
+                                 column_config={"summary": st.column_config.TextColumn("Finding", width="large")})
+
+    st.markdown("#### Chart scan (information only)")
+    if scans.empty:
+        st.info("No scan yet.")
+        return
+    latest = scans["as_of_date"].iloc[0]
+    view = scans[scans["as_of_date"] == latest].sort_values("score", ascending=False)
+    st.caption(f"Setups found at the close of {latest}. A setup is a place to look, not an order.")
+    st.dataframe(view[["ticker", "setup", "close_price", "score", "detail"]], hide_index=True, width="stretch",
+                 column_config={"close_price": st.column_config.NumberColumn("Close", format="%.2f"),
+                                "score": st.column_config.NumberColumn("Score", format="%.2f"),
+                                "detail": st.column_config.TextColumn("Why", width="large")})
+
+
 def health(snaps: pd.DataFrame) -> None:
     st.subheader("Health")
     now = dt.datetime.now(IST)
@@ -337,16 +381,18 @@ if top[1].button("Refresh now"):
 
 snaps_df = db.snapshots()
 trades_df = db.load("trades", order="exit_date")
-tabs = st.tabs(["Overview", "Today", "Positions", "Trade log", "Strategies", "Health"])
+tabs = st.tabs(["Overview", "Today", "Agent", "Positions", "Trade log", "Strategies", "Health"])
 with tabs[0]:
     overview(snaps_df, trades_df)
 with tabs[1]:
     today(snaps_df)
 with tabs[2]:
-    positions()
+    agent()
 with tabs[3]:
-    trade_log(trades_df)
+    positions()
 with tabs[4]:
-    strategies()
+    trade_log(trades_df)
 with tabs[5]:
+    strategies()
+with tabs[6]:
     health(snaps_df)
