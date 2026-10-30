@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # PaperTrader server setup for an Oracle Cloud Always Free VM. PAPER TRADING ONLY.
 #
-# Tested target: Ubuntu 22.04 / 24.04 on VM.Standard.A1.Flex (Ampere, arm64) or
+# Tested target: Ubuntu 20.04 / 22.04 / 24.04 on VM.Standard.A1.Flex (Ampere, arm64) or
 # VM.Standard.E2.1.Micro (amd64, 1 GB RAM). Run it once, as the default "ubuntu" user:
 #
 #   curl -fsSL https://raw.githubusercontent.com/aeturijayasimhayadav2004/papertrader/main/deploy/oracle/setup.sh -o setup.sh
 #   sudo bash setup.sh
 #
 # Safe to run again (it updates instead of reinstalling). What it does:
-#   1. installs git, Python >= 3.11 (deadsnakes PPA on 22.04), unattended-upgrades
+#   1. installs git, Python >= 3.11 (uv standalone build when the OS has none), unattended-upgrades
 #   2. adds 2 GB swap when the VM has under 2 GB RAM (E2.1.Micro)
 #   3. creates the service user "papertrader" (no login shell, no sudo)
 #   4. clones the repo into /opt/papertrader and builds a venv there
@@ -47,11 +47,14 @@ for cand in python3.12 python3.11 python3; do
   fi
 done
 if [[ -z "$PY" ]]; then
-  log "Python 3.11 not found: adding the deadsnakes PPA (Ubuntu 22.04)"
-  add-apt-repository -y ppa:deadsnakes/ppa
-  apt-get update -y
-  apt-get install -y python3.11 python3.11-venv python3.11-dev
-  PY="$(command -v python3.11)"
+  # uv's standalone Python works on every Ubuntu release, including 20.04, which the
+  # deadsnakes PPA no longer builds for.
+  log "Python 3.11 not found: installing it with uv into /opt/python"
+  curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin INSTALLER_NO_MODIFY_PATH=1 sh
+  UV_PYTHON_INSTALL_DIR=/opt/python /usr/local/bin/uv python install 3.11
+  ln -sf "$(UV_PYTHON_INSTALL_DIR=/opt/python /usr/local/bin/uv python find 3.11)" /usr/local/bin/python3.11
+  chmod -R a+rX /opt/python
+  PY=/usr/local/bin/python3.11
 else
   ver="$("$PY" -c 'import sys; print(f"{sys.version_info[0]}.{sys.version_info[1]}")')"
   apt-get install -y "python${ver}-venv" || apt-get install -y python3-venv
