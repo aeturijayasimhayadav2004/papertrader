@@ -108,6 +108,11 @@ compared honestly with the research numbers. Change it under `portfolio:` in con
 
 ## The brain (optional): Claude reviews each brief
 
+**Provider.** The default is **Groq** (free tier, `openai/gpt-oss-120b`): set `GROQ_API_KEY` in `.env`,
+as a GitHub secret, and on the server. Claude is the paid alternative: `brain.provider: anthropic`. Both
+use the same prompt, the same veto-only rules and the same answer checks
+(`agent/groq_client.py` adapts Groq to the same interface).
+
 When `brain.enabled` is true and an API key exists, Claude reads all desk findings for a buy
 candidate and returns agree, veto or abstain, with a confidence and up to three sentences of
 reasoning (desk `brain`).

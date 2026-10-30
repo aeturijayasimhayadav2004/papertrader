@@ -18,6 +18,9 @@ an "abstain" view with `error` set. Nothing here raises.
 
 Spend is tracked per calendar month in data/agent/brain_usage.json from each
 response's token usage and the price table below.
+
+Provider: "anthropic" (Claude, paid) or "groq" (open models on Groq's free tier,
+agent/groq_client.py). Both go through the same prompt, schema check and limits.
 """
 from __future__ import annotations
 
@@ -54,6 +57,8 @@ PRICES: dict[str, tuple[float, float, float]] = {
     "claude-opus-5": (5.00, 25.00, 0.10),
     "claude-sonnet-5-5": (2.00, 10.00, 0.10),
     "claude-haiku-5-5": (0.10, 0.50, 0.10),   # prompts up to 100K tokens; ours are ~3K
+    "openai/gpt-oss": (0.0, 0.0, 0.0),         # Groq free tier (rate limited, no charge)
+    "qwen/": (0.0, 0.0, 0.0),
 }
 CACHE_WRITE = 1.25
 
@@ -105,8 +110,9 @@ REVIEW_SCHEMA: dict[str, Any] = {
 
 @dataclass
 class BrainConfig:
-    """Settings for the Claude reviewer (config.yaml `agent.brain`)."""
+    """Settings for the reviewer (config.yaml `brain:`)."""
     enabled: bool = False                    # off until an API key exists
+    provider: str = "anthropic"              # anthropic (Claude, paid) | groq (free tier)
     model: str = "claude-opus-5-5"          # or "claude-haiku-5-5" for ~40x cheaper reviews
     effort: str = "low"                      # thinking is always on for Opus 5.5; effort sets how much
     max_tokens: int = 3000                   # thinking + the short JSON reply
@@ -127,6 +133,9 @@ class BrainConfig:
         cfg = cls(**d)
         cfg.enabled = bool(cfg.enabled)
         cfg.model = str(cfg.model).strip()
+        cfg.provider = str(cfg.provider).strip().lower()
+        if cfg.provider not in ("anthropic", "groq"):
+            raise ValueError(f"brain.provider must be anthropic or groq, not {cfg.provider!r}")
         cfg.effort = str(cfg.effort).strip().lower()
         if cfg.effort not in ("low", "medium", "high", "xhigh", "max"):
             raise ValueError(f"agent.brain.effort: bad value {cfg.effort!r}")
@@ -176,7 +185,10 @@ def reset_run_counter() -> None:
     _calls_this_run = 0
 
 
-def _has_credential() -> bool:
+def _has_credential(provider: str = "anthropic") -> bool:
+    if provider == "groq":
+        from papertrader.agent.groq_client import groq_key
+        return groq_key() is not None
     if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
         return True
     try:  # a local run may keep the key only in .env
@@ -191,6 +203,10 @@ def brain_available(cfg: BrainConfig) -> tuple[bool, str]:
     """(usable, why). Never reveals the key itself."""
     if not cfg.enabled:
         return False, "brain disabled (agent.brain.enabled is false)"
+    if cfg.provider == "groq":
+        if not _has_credential("groq"):
+            return False, "no GROQ_API_KEY in the environment or .env"
+        return True, f"brain ready (Groq {cfg.model})"
     if not _has_credential():
         return False, "no ANTHROPIC_API_KEY (or ANTHROPIC_AUTH_TOKEN) in the environment or .env"
     try:
@@ -325,7 +341,7 @@ def build_user_message(ticker: str, strategy_label: str, signal_reason: str, fin
 
 
 def _wants_fallback(cfg: BrainConfig) -> bool:
-    return bool(cfg.fallbacks) and cfg.model.startswith(_FALLBACK_PREFIXES)
+    return cfg.provider == "anthropic" and bool(cfg.fallbacks) and cfg.model.startswith(_FALLBACK_PREFIXES)
 
 
 def _request(cfg: BrainConfig, system: str, user: str, schema: dict[str, Any] | None,
@@ -347,6 +363,9 @@ def _request(cfg: BrainConfig, system: str, user: str, schema: dict[str, Any] | 
 
 
 def _client(cfg: BrainConfig) -> Any:
+    if cfg.provider == "groq":
+        from papertrader.agent.groq_client import GroqClient
+        return GroqClient(timeout=cfg.timeout_s)
     import anthropic
     return anthropic.Anthropic(timeout=cfg.timeout_s, max_retries=2)
 
@@ -494,8 +513,9 @@ def brain_finding(view: BrainView, cfg: BrainConfig | None = None) -> Finding:
     """The brain's view as a desk finding: a confident veto blocks, a weak one warns."""
     cfg = cfg or BrainConfig()
     data = asdict(view)
+    who = "Claude" if cfg.provider == "anthropic" else f"Groq {cfg.model.split('/')[-1]}"
     if view.error:
-        return Finding(DESK, UNKNOWN, f"Claude: no view ({view.error}).", data)
+        return Finding(DESK, UNKNOWN, f"{who}: no view ({view.error}).", data)
     if view.decision == VETO:
         status = BLOCK if view.confidence >= cfg.veto_min_confidence else WARN
         word = "veto"
@@ -504,7 +524,7 @@ def brain_finding(view: BrainView, cfg: BrainConfig | None = None) -> Finding:
         word = "agrees" if view.decision == AGREE else "abstains"
     text = view.rationale or "no rationale given."
     risks = f" Risks: {'; '.join(view.risks[:3])}." if view.risks and view.decision == VETO else ""
-    return Finding(DESK, status, f"Claude: {text} ({word}, confidence {view.confidence:.2f}).{risks}", data)
+    return Finding(DESK, status, f"{who}: {text} ({word}, confidence {view.confidence:.2f}).{risks}", data)
 
 
 def daily_commentary(summary_text: str, briefs: list[Any], scan_lines: list[str],

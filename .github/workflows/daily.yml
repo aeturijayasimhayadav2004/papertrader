@@ -54,7 +54,8 @@ jobs:
           PAPERTRADER_REQUIRE_SUPABASE: "1"
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          # Optional: Claude reviews agent briefs (veto only). Unset = brain skipped.
+          # Optional LLM brain (veto only): Groq free tier, or Claude. Unset = brain skipped.
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           # Repo Settings -> Variables -> PAPERTRADER_KILL_SWITCH = 1 stops new buys without a code change.
           PAPERTRADER_KILL_SWITCH: ${{ vars.PAPERTRADER_KILL_SWITCH }}

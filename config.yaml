@@ -164,14 +164,13 @@ intraday:                   # always-on server only (docs/SERVER.md): opening-ra
   use_news_gate: true
   use_events_gate: true
 
-brain:                      # optional: Claude reviews each agent brief and can only VETO a buy (docs/AGENT.md)
-  enabled: true             # runs only when ANTHROPIC_API_KEY is set (.env / GitHub secret); otherwise skipped
-  model: claude-opus-5-5    # or claude-haiku-5-5 (about 40x cheaper)
-  effort: low               # low keeps thinking short and cost about $0.02 per brief on Opus
+brain:                      # optional: an LLM reviews each agent brief and can only VETO a buy (docs/AGENT.md)
+  enabled: true             # runs only when the provider's key is set (.env / GitHub secret); otherwise skipped
+  provider: groq            # groq (free tier, GROQ_API_KEY) | anthropic (Claude, paid, ANTHROPIC_API_KEY)
+  model: openai/gpt-oss-120b   # groq: openai/gpt-oss-120b | anthropic: claude-opus-5-5 or claude-haiku-5-5
   veto_min_confidence: 0.7  # a veto this confident blocks the buy; a weaker one only warns
   max_calls_per_run: 10
-  monthly_budget_usd: 5     # stop calling Claude once this month's spend reaches it
-  fallbacks: default        # server-side fallback model if a request is declined (Opus only); none = off
+  monthly_budget_usd: 5     # only matters for anthropic; Groq's free tier costs nothing
 
 notify:
   telegram: true            # sends only if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are set
