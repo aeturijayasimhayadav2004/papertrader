@@ -131,3 +131,10 @@ def test_no_headlines_is_ok_and_failure_is_unknown():
 def test_bad_xml_is_unknown_not_raised():
     f = news_check("INFY.NS", fetch=lambda url: b"<html>not rss", now=NOW)
     assert f.status == "unknown"
+
+
+def test_sister_company_headlines_are_not_about_this_company():
+    from papertrader.agent.news import about_sibling
+    assert about_sibling("SBI Life gets IRDAI penalty notice", "SBI")
+    assert not about_sibling("SBI raises Rs 10,000 crore; SBI Life also up", "SBI")
+    assert not about_sibling("SBI hikes lending rates", "SBI")

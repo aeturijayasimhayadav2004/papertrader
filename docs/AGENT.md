@@ -85,3 +85,72 @@ The same steps work without Claude: `python scripts/agent.py --help`.
   the stock's own bars, and results days, halts and news are not in that sample.
 * **Keyword news tagging can misfire.** Read the headlines it quotes.
 * **2027 NSE holidays are not published yet.** Add them to `agent/market.py` in December.
+
+## Rotation strategy (a strategy that passed the test)
+
+The per-stock strategies never beat buy-and-hold, so the bot held cash. `portfolio/` adds
+portfolio-level ("rotation") strategies that rank the whole universe each month-end and hold the
+best few. Seven candidates were tested, with parameters fixed in advance from published research and
+nothing tuned (`scripts/research_rotation.py`, report in `reports/rotation_research.md`).
+
+* On the **Nifty 100**, four momentum variants passed the same bar as before: they beat equal-weight
+  buy-and-hold out-of-sample (2022 to 2026) net of NSE charges and won 3 of 5 yearly folds.
+* On the **Nifty 50**, none passed (2 of 5 folds).
+* **Caveat:** the test uses today's index members for the past, which flatters momentum
+  (survivorship bias), and 5 folds are weak evidence.
+
+Paper-traded: `momentum_12_1_regime` on the Nifty 100. At each month-end it holds the top 10 by
+12-month return (skipping the latest month), in equal weights, and holds cash while Nifty is below its
+200-day average. It had the best risk-adjusted return (Sharpe 1.34 vs 1.29 for buy-and-hold) and the
+smallest drawdown of the four that passed. It runs as a **separate Rs 10 lakh paper account**
+(`portfolio/paper.py`, table `rotation_snapshots`, dashboard **Rotation** tab), so its results can be
+compared honestly with the research numbers. Change it under `portfolio:` in config.yaml.
+
+## The brain (optional): Claude reviews each brief
+
+When `brain.enabled` is true and an API key exists, Claude reads all desk findings for a buy
+candidate and returns agree, veto or abstain, with a confidence and up to three sentences of
+reasoning (desk `brain`).
+
+**Veto only.** The brain can stop a buy, never start one, and never changes size, stop or target.
+A veto with confidence >= `veto_min_confidence` (0.7) is a BLOCK; a weaker veto is a WARN; agree and
+abstain are information. Any failure (no key, network, refusal, bad reply, budget used up) gives no
+view, so the bot runs exactly as before, even with `block_on_unknown`. Headlines and filings are
+untrusted web text: they go to Claude inside one delimited JSON block, and the system prompt tells it
+to treat that block as data and ignore any instructions inside it.
+
+**Enable it**
+1. Create an API key at https://console.anthropic.com (Settings -> API keys) and add credit.
+2. Local: put `ANTHROPIC_API_KEY=...` in `.env`. GitHub Actions: add a repository secret
+   `ANTHROPIC_API_KEY` (the workflow already passes it to the run).
+3. `config.yaml` `brain:` sets the model (`claude-opus-5-5` by default, or `claude-haiku-5-5`), the
+   effort (`low`), `max_calls_per_run` and `monthly_budget_usd` (default 5). Spend is tracked in
+   `data/agent/brain_usage.json`.
+
+**Cost per brief (estimate):** about 2,000 tokens in and 400-1,500 out. `claude-opus-5-5` at effort
+low costs about $0.02 (up to $0.04); `claude-haiku-5-5` costs about $0.0005. On Opus, if Claude's safety
+filter declines a request, the API retries it on another Claude model automatically
+(`fallbacks: default`); set `fallbacks: none` to turn that off.
+
+## Learning from results
+
+`agent/learning.py` and `scripts/learn.py`, run after every daily run (information only):
+
+* **Live:** for every brief and scan setup, what the stock did 1, 5 and 20 trading days later and
+  against the average stock (table `agent_outcomes`), summarised per desk, verdict, Claude decision
+  and setup (table `agent_scorecard`).
+* **History backfill:** the same scan rules replayed over 5 years of the Nifty 50, and the odds desk
+  replayed on 3,400+ past strategy trades. It compares what the desk would have blocked with what it
+  would have allowed.
+* **Suggestions** in `reports/learning.md` give the evidence and sample size, and are never applied
+  automatically (auto-tuning on the same data overfits). Rows with fewer than 20 cases are marked
+  "too few to judge". The dashboard's **Learning** tab shows the scorecards.
+
+First results (Nifty 50, 2021-2026):
+
+* **Bull flag** is the only setup with a historical edge: +0.67% vs the average stock over 20 days,
+  better in 4 of 6 years.
+* **Breakout** and **near the 52-week high** lagged in most years.
+* **Odds desk:** it would have blocked 61% of trades with almost no difference in average return
+  overall (+1.39% blocked vs +1.35% allowed). It helped for momentum, MA crossover, Bollinger and RSI,
+  and hurt for breakout and supertrend.

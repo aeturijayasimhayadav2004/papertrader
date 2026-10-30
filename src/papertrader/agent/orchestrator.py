@@ -10,7 +10,11 @@ else (risk halt, kill switch, protections, regime, data check) has blocked it.
 
 A desk whose data cannot be read reports "unknown". That blocks only when
 `agent.block_on_unknown` is true, so a flaky free data source never stops the
-bot on its own. Desks never see future data: the odds desk uses bars up to the
+bot on its own.
+
+The optional brain (Claude, agent/brain.py) reads the desks' findings last and can
+only veto: a confident veto is a BLOCK, a weak one a WARN. It is asked only when
+it is enabled and has an API key, and its "unknown" (no answer) never blocks. Desks never see future data: the odds desk uses bars up to the
 signal day only.
 """
 from __future__ import annotations
@@ -70,7 +74,8 @@ class Brief:
 
 
 def verdict_of(findings: list[Finding], block_on_unknown: bool) -> str:
-    if any(f.status == BLOCK for f in findings) or (block_on_unknown and any(f.status == UNKNOWN for f in findings)):
+    unknown_blocks = block_on_unknown and any(f.status == UNKNOWN and f.desk != "brain" for f in findings)
+    if any(f.status == BLOCK for f in findings) or unknown_blocks:
         return VERDICT_BLOCK
     if any(f.status == WARN for f in findings):
         return CAUTION
@@ -79,15 +84,17 @@ def verdict_of(findings: list[Finding], block_on_unknown: bool) -> str:
 
 class Coordinator:
     def __init__(self, cfg: AgentConfig, costs: CostModel, exits: ExitRules,
-                 desks: dict[str, Desk] | None = None):
+                 desks: dict[str, Desk] | None = None, brain: Any = None):
         self.cfg = cfg
         self.costs = costs
         self.exits = exits
         self.desks = desks if desks is not None else default_desks(cfg, costs, exits)
+        # brain(ticker, strategy, reason, findings) -> Finding, or None when the brain is off
+        self.brain = brain
         self._cache: dict[tuple[str, str, dt.date], Finding] = {}
 
     def brief(self, day: dt.date, ticker: str, strategy: Strategy, history: pd.DataFrame,
-              info_only: bool = False) -> Brief:
+              info_only: bool = False, reason: str = "") -> Brief:
         findings = []
         for name in self.cfg.desks:
             desk = self.desks.get(name)
@@ -102,9 +109,36 @@ class Coordinator:
                     log.warning("Desk %s failed for %s: %s", name, ticker, exc)
                     self._cache[key] = unknown(name, f"{type(exc).__name__}: {exc}")
             findings.append(self._cache[key])
+        if self.brain is not None:
+            key = ("brain", f"{ticker}|{strategy.name}", day)
+            if key not in self._cache:
+                try:
+                    self._cache[key] = self.brain(ticker, strategy, reason, list(findings))
+                except Exception as exc:
+                    log.warning("Brain failed for %s: %s", ticker, exc)
+                    self._cache[key] = unknown("brain", f"{type(exc).__name__}: {exc}")
+            findings.append(self._cache[key])
         b = Brief(day, ticker, strategy.name, verdict_of(findings, self.cfg.block_on_unknown), findings, info_only)
         log.info("Agent brief %s %s (%s): %s", ticker, strategy.name, b.verdict, b.reason())
         return b
+
+
+def make_brain(raw: dict[str, Any] | None) -> Callable[..., Finding] | None:
+    """The Claude reviewer as a callable, or None when disabled / no API key (logged once)."""
+    from papertrader.agent.brain import BrainConfig, brain_available, brain_finding, reset_run_counter, review_brief
+
+    cfg = BrainConfig.from_dict(raw or {})
+    ok, why = brain_available(cfg)
+    if not ok:
+        if cfg.enabled:
+            log.warning("Brain enabled in config but unavailable: %s", why)
+        return None
+    reset_run_counter()
+
+    def review(ticker: str, strategy: Strategy, reason: str, findings: list[Finding]) -> Finding:
+        return brain_finding(review_brief(ticker, strategy.label, reason, findings, cfg=cfg), cfg)
+
+    return review
 
 
 def default_desks(cfg: AgentConfig, costs: CostModel, exits: ExitRules) -> dict[str, Desk]:

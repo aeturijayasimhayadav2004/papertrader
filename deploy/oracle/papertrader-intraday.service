@@ -1,0 +1,29 @@
+# One intraday PAPER cycle. Started every 5 minutes by papertrader-intraday.timer.
+# PAPER TRADING ONLY: no broker code exists in this project.
+[Unit]
+Description=PaperTrader intraday paper cycle (NSE opening-range breakouts)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=papertrader
+Group=papertrader
+WorkingDirectory=/opt/papertrader
+# yfinance and matplotlib caches must live somewhere writable under ProtectSystem=strict.
+Environment=XDG_CACHE_HOME=/opt/papertrader/data/.cache MPLCONFIGDIR=/opt/papertrader/data/.mpl
+# The script loads /opt/papertrader/.env itself (Telegram, Supabase).
+ExecStart=/opt/papertrader/.venv/bin/python scripts/intraday_loop.py --once --quiet --sync
+# Exit 3 = the previous cycle is still running; that is not a failure.
+SuccessExitStatus=3
+# A cycle must finish well inside its 5-minute slot.
+TimeoutStartSec=280
+Nice=5
+# Hardening: read-only system, writable data and logs only.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+ReadWritePaths=/opt/papertrader/data /opt/papertrader/logs

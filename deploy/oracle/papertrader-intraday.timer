@@ -1,0 +1,24 @@
+# Every 5 minutes, Monday-Friday, 09:15-15:30 IST (30 s past each mark so the 5-minute
+# bar that just closed is in Yahoo's data). The server clock stays UTC; the time zone
+# is named on each line. NSE holidays need no timer change: on a holiday a cycle is a no-op.
+#
+# Check the schedule on the VM:
+#   systemd-analyze calendar --iterations=8 'Mon..Fri *-*-* 09:15/5:30 Asia/Kolkata'
+#   systemctl list-timers papertrader-intraday.timer
+[Unit]
+Description=PaperTrader intraday paper cycle every 5 minutes in NSE hours
+
+[Timer]
+# 09:15:30, 09:20:30 ... 09:55:30
+OnCalendar=Mon..Fri *-*-* 09:15/5:30 Asia/Kolkata
+# 10:00:30 ... 14:55:30
+OnCalendar=Mon..Fri *-*-* 10..14:00/5:30 Asia/Kolkata
+# 15:00:30 ... 15:30:30 (15:15 flattens, the first cycle after 15:30 sends the day's summary)
+OnCalendar=Mon..Fri *-*-* 15:00,05,10,15,20,25,30:30 Asia/Kolkata
+# No catch-up of missed runs after a reboot: a cycle at the wrong time is worse than none.
+Persistent=false
+AccuracySec=5s
+Unit=papertrader-intraday.service
+
+[Install]
+WantedBy=timers.target

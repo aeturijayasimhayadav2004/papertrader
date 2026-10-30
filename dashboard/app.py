@@ -312,6 +312,113 @@ def agent() -> None:
                                 "detail": st.column_config.TextColumn("Why", width="large")})
 
 
+def learning() -> None:
+    st.subheader("Learning from results")
+    st.markdown("Does the agent help? For every brief and scan setup the bot measures what the stock did "
+                "afterwards (1, 5 and 20 trading days, against the average stock). The history rows replay the "
+                "same rules over the last 5 years. **Information only:** nothing here changes the settings, and a "
+                "row with fewer than 20 cases is too few to judge.")
+    try:
+        sc = db.load("agent_scorecard")
+    except Exception as exc:
+        st.warning(f"Learning tables not available yet: {exc}")
+        return
+    if sc.empty:
+        st.info("No scorecards yet: they appear after the next daily run.")
+        return
+    st.caption(f"Computed {sc['as_of_date'].max()}.")
+    pct = {c: st.column_config.NumberColumn(c, format="%.2f%%") for c in ("mean_ret_pct", "median_ret_pct",
+                                                                            "mean_excess_pct")}
+    pct["hit_rate"] = st.column_config.NumberColumn("hit_rate", format="percent")
+    pct["note"] = st.column_config.TextColumn("note", width="large")
+    sections = [("setup_history", "Scan setups, last 5 years (excess = vs the average stock that day)"),
+                ("odds_history", "Odds desk, last 5 years: trades it would have blocked vs allowed"),
+                ("verdict", "Live briefs by verdict"), ("desk", "Live briefs by desk finding"),
+                ("brain", "Claude's reviews"), ("setup", "Live scan setups")]
+    for kind, title in sections:
+        part = sc[sc["kind"] == kind]
+        if part.empty:
+            continue
+        st.markdown(f"#### {title}")
+        cols = [c for c in ("key", "status", "horizon_days", "n", "mean_ret_pct", "median_ret_pct", "hit_rate",
+                            "mean_excess_pct", "note") if c in part]
+        st.dataframe(part.sort_values(["key", "status", "horizon_days"])[cols], hide_index=True, width="stretch",
+                     column_config=pct)
+
+
+def intraday() -> None:
+    st.subheader("Intraday paper trading (always-on server)")
+    st.markdown("Runs every 5 minutes during market hours on the always-on server: opening-range breakouts, "
+                "planned stop and target, odds check, size, risk check, simulated fill, out by 15:15 IST. "
+                "Separate Rs 10 lakh paper account. PAPER MONEY ONLY.")
+    try:
+        j = db.load("agent_intraday", order="ts", desc=True, limit=500)
+    except Exception as exc:
+        st.warning(f"Intraday table not available yet: {exc}")
+        return
+    if j.empty:
+        st.info("No intraday activity yet: it starts once the server is set up (docs/SERVER.md).")
+        return
+    days = sorted(j["day"].dropna().unique(), reverse=True)
+    day = st.selectbox("Day", days)
+    view = j[j["day"] == day]
+    c = st.columns(3)
+    c[0].metric("Entries", int((view["event"] == "entry").sum()))
+    c[1].metric("Exits", int(view["event"].isin(["exit", "flatten"]).sum()))
+    c[2].metric("Realised P&L", inr(view["pnl"].fillna(0).sum()))
+    st.dataframe(view[["ts", "ticker", "event", "price", "qty", "pnl", "reason"]], hide_index=True, width="stretch",
+                 column_config={"reason": st.column_config.TextColumn("Reason", width="large")})
+
+
+def rotation() -> None:
+    st.subheader("Rotation strategy (separate paper account)")
+    st.markdown("Each month-end the strategy ranks the Nifty 100 by 12-month return (skipping the last month), "
+                "holds the top 10 in equal weights, and goes to cash while Nifty is below its 200-day average. "
+                "Orders fill at the next open with NSE charges. It passed the out-of-sample test on the Nifty 100 "
+                "but not the Nifty 50 (see reports/rotation_research.md), so this is a live paper trial. "
+                "PAPER MONEY ONLY.")
+    try:
+        rs = db.load("rotation_snapshots", order="as_of_date")
+    except Exception as exc:
+        st.warning(f"Rotation table not available yet: {exc}")
+        return
+    if rs.empty:
+        st.info("No rotation data yet: it starts on the next daily run.")
+        return
+    rs["as_of_date"] = pd.to_datetime(rs["as_of_date"])
+    last, first = rs.iloc[-1], rs.iloc[0]
+    c = st.columns(4)
+    c[0].metric("Equity", inr(last["equity"]))
+    c[1].metric("Return since start", pct(last["equity"] / first["equity"] - 1))
+    if pd.notna(last.get("benchmark_close")) and pd.notna(first.get("benchmark_close")):
+        c[2].metric("Nifty 50 same period", pct(last["benchmark_close"] / first["benchmark_close"] - 1))
+    c[3].metric("Holdings", int(last["n_holdings"] or 0))
+    if len(rs) > 1:
+        fig = go.Figure()
+        fig.add_scatter(x=rs["as_of_date"], y=rs["equity"] / rs["equity"].iloc[0] * 100, name="Rotation")
+        if rs["benchmark_close"].notna().all():
+            fig.add_scatter(x=rs["as_of_date"], y=rs["benchmark_close"] / rs["benchmark_close"].iloc[0] * 100,
+                            name="Nifty 50")
+        fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), yaxis_title="Start = 100")
+        st.plotly_chart(fig, width="stretch")
+    holdings = last.get("holdings")
+    if isinstance(holdings, str):
+        holdings = json.loads(holdings or "[]")
+    if holdings:
+        st.markdown("#### Holdings")
+        st.dataframe(pd.DataFrame(holdings), hide_index=True, width="stretch",
+                     column_config={"weight": st.column_config.NumberColumn("Weight", format="percent"),
+                                    "reason": st.column_config.TextColumn("Why", width="large")})
+    pending = last.get("pending")
+    if isinstance(pending, str):
+        pending = json.loads(pending or "[]")
+    if pending:
+        st.markdown("#### Orders for the next open")
+        st.dataframe(pd.DataFrame(pending, columns=["ticker", "side", "qty"]), hide_index=True)
+    if last.get("note"):
+        st.info(last["note"])
+
+
 def health(snaps: pd.DataFrame) -> None:
     st.subheader("Health")
     now = dt.datetime.now(IST)
@@ -381,7 +488,8 @@ if top[1].button("Refresh now"):
 
 snaps_df = db.snapshots()
 trades_df = db.load("trades", order="exit_date")
-tabs = st.tabs(["Overview", "Today", "Agent", "Positions", "Trade log", "Strategies", "Health"])
+tabs = st.tabs(["Overview", "Today", "Agent", "Rotation", "Intraday", "Learning", "Positions",
+                "Trade log", "Strategies", "Health"])
 with tabs[0]:
     overview(snaps_df, trades_df)
 with tabs[1]:
@@ -389,10 +497,16 @@ with tabs[1]:
 with tabs[2]:
     agent()
 with tabs[3]:
-    positions()
+    rotation()
 with tabs[4]:
-    trade_log(trades_df)
+    intraday()
 with tabs[5]:
-    strategies()
+    learning()
 with tabs[6]:
+    positions()
+with tabs[7]:
+    trade_log(trades_df)
+with tabs[8]:
+    strategies()
+with tabs[9]:
     health(snaps_df)

@@ -106,3 +106,25 @@ def test_scan_rows_saved_and_scan_failure_is_harmless(cfg):
     r2 = runner(cfg, store, 11)
     r2.coordinator, r2.scanner = coordinator({}), broken
     assert r2.run().status == "ok"
+
+
+def test_brain_veto_blocks_and_brain_unknown_never_blocks():
+    seen = []
+
+    def veto(ticker, strategy, reason, findings):
+        seen.append((reason, [f.desk for f in findings]))
+        return Finding("brain", BLOCK, "Claude: results in two days; skip.")
+
+    c = Coordinator(AgentConfig(enabled=True, desks=("news",)), flat(0.002), ExitRules(),
+                    desks={"news": desk(INFO)}, brain=veto)
+    b = c.brief(dt.date(2024, 1, 2), "AAA.NS", AlwaysBuy(), None, reason="MA crossed up.")
+    assert b.blocked and seen == [("MA crossed up.", ["stub"])]
+
+    c2 = Coordinator(AgentConfig(enabled=True, desks=("news",), block_on_unknown=True), flat(0.002), ExitRules(),
+                     desks={"news": desk(INFO)}, brain=lambda *a: Finding("brain", UNKNOWN, "Claude: no view."))
+    assert c2.brief(dt.date(2024, 1, 2), "AAA.NS", AlwaysBuy(), None).verdict == GO
+
+
+def test_make_brain_is_off_without_config():
+    from papertrader.agent.orchestrator import make_brain
+    assert make_brain({}) is None

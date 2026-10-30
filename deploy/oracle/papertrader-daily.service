@@ -1,0 +1,24 @@
+# Backup for the GitHub Actions daily paper run. Disabled by default.
+# GitHub Actions stays the primary. run_daily.py skips days it already processed, so
+# running both is safe (idempotent): whichever runs second does nothing.
+[Unit]
+Description=PaperTrader daily paper run (backup for GitHub Actions)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=papertrader
+Group=papertrader
+WorkingDirectory=/opt/papertrader
+# yfinance and matplotlib caches must live somewhere writable under ProtectSystem=strict.
+Environment=XDG_CACHE_HOME=/opt/papertrader/data/.cache MPLCONFIGDIR=/opt/papertrader/data/.mpl
+Environment=PAPERTRADER_REQUIRE_SUPABASE=1
+ExecStart=/opt/papertrader/.venv/bin/python scripts/run_daily.py
+TimeoutStartSec=1200
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/papertrader/data /opt/papertrader/logs -/opt/papertrader/reports

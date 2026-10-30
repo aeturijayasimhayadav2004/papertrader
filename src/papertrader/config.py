@@ -200,6 +200,10 @@ class Config:
     trading: TradingConfig = field(default_factory=TradingConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     agent: AgentConfig = field(default_factory=AgentConfig)
+    # Raw sections parsed by their own modules (each has a from_dict with defaults):
+    # brain -> agent.brain.BrainConfig, intraday -> agent.intraday_runner.IntradayConfig,
+    # portfolio -> rotation strategy settings, learning -> agent.learning options.
+    sections: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def load_config(path: str | Path | None = None) -> Config:
@@ -366,4 +370,5 @@ def parse_config(raw: dict[str, Any]) -> Config:
         trading=trading,
         notify=notify,
         agent=agent,
+        sections={k: dict(raw.get(k) or {}) for k in ("brain", "intraday", "portfolio", "learning")},
     )

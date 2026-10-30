@@ -7,7 +7,9 @@ declare
     t text;
 begin
     foreach t in array array['runs', 'decisions', 'orders', 'positions', 'trades',
-                             'daily_snapshots', 'backtest_results', 'agent_briefs', 'agent_scans']
+                             'daily_snapshots', 'backtest_results', 'agent_briefs', 'agent_scans',
+                             'agent_outcomes', 'agent_scorecard', 'agent_intraday',
+                             'rotation_snapshots']
     loop
         execute format('alter table public.%I enable row level security', t);
 

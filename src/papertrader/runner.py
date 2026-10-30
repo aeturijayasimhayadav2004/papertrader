@@ -14,7 +14,8 @@ For each new trading day D (in order):
      Then risk rules size it and an order is queued for the next open. Every
      decision is logged with its reason.
   7. Save decisions, orders, trades, positions, agent briefs and a snapshot.
-  8. After the last day: the agent's chart scan of the wider universe.
+  8. After the last day: the agent's chart scan of the wider universe, and the
+     rotation strategy's separate paper account (portfolio/paper.py), if enabled.
 
 The agent desks read live news and filings, so they only run for the most
 recent day; catch-up days (missed runs) trade on the strategy rules alone.
@@ -84,6 +85,7 @@ class DailyRunner:
         notifier: Notifier | None = None,
         coordinator: Any = None,
         scanner: Callable[..., list[dict[str, Any]]] | None = None,
+        rotation: Callable[[], list[str]] | None = None,
     ):
         self.cfg = cfg
         self.store = store
@@ -100,9 +102,17 @@ class DailyRunner:
         if coordinator is None and cfg.agent.enabled:
             from papertrader.agent.orchestrator import Coordinator
 
-            coordinator = Coordinator(cfg.agent, self.costs, self.exits)
+            from papertrader.agent.orchestrator import make_brain
+
+            try:
+                brain = make_brain(cfg.sections.get("brain"))
+            except Exception as exc:  # a bad brain section must not stop trading
+                log.warning("Brain not started: %s", exc)
+                brain = None
+            coordinator = Coordinator(cfg.agent, self.costs, self.exits, brain=brain)
         self.coordinator = coordinator
         self.scanner = scanner
+        self.rotation = rotation
         self._agent_live = False
         self._briefs: list[Any] = []
 
@@ -199,6 +209,7 @@ class DailyRunner:
         summary.briefs = [f"{b.ticker} {b.strategy}: {b.summary()}" for b in self._briefs]
         if self.cfg.agent.enabled and self.cfg.agent.scan_universe != "none":
             summary.scan = self._scan(last_bar, universe)
+        summary.events += self._rotation()
 
         n_trades = sum(1 for d in summary.decisions if d["action"] in (A_BUY, A_SELL))
         summary.status = "ok"
@@ -291,6 +302,19 @@ class DailyRunner:
             }]),
         ]
         return ops, selection_state, equity, decisions
+
+    def _rotation(self) -> list[str]:
+        """Run the rotation paper account (its own cash and holdings). Never fails the run."""
+        if self.rotation is None and not (self.cfg.sections.get("portfolio") or {}).get("enabled"):
+            return []
+        try:
+            if self.rotation is not None:
+                return self.rotation()
+            from papertrader.portfolio.paper import RotationPaper
+            return RotationPaper(self.cfg, self.store, now=self.now).run()
+        except Exception as exc:
+            log.warning("Rotation paper account skipped: %s", exc)
+            return [f"Rotation paper account skipped: {exc}"[:300]]
 
     def _scan(self, d: dt.date, universe: dict[str, pd.DataFrame]) -> list[str]:
         """Agent chart scan of the wider universe on the latest day. Never fails the run."""
@@ -400,7 +424,7 @@ class DailyRunner:
                     if sig == Signal.BUY:
                         note = ""
                         if self._agent_live:
-                            b = self.coordinator.brief(d, ticker, strat, history[ticker], info_only=True)
+                            b = self.coordinator.brief(d, ticker, strat, history[ticker], info_only=True, reason=why)
                             self._briefs.append(b)
                             note = f" {b.summary()}"
                         add(ticker, strat.name, sig.value, A_NOT_SELECTED,
@@ -420,7 +444,7 @@ class DailyRunner:
                         continue
                     agent_note = ""
                     if self._agent_live:
-                        b = self.coordinator.brief(d, ticker, strat, history[ticker])
+                        b = self.coordinator.brief(d, ticker, strat, history[ticker], reason=why)
                         self._briefs.append(b)
                         if b.blocked:
                             add(ticker, strat.name, sig.value, A_BLOCKED, f"{why} Blocked by the agent: {b.reason()}",

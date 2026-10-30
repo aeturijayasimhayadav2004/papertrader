@@ -63,9 +63,34 @@ TABLES: dict[str, tuple[str, dict[str, str]]] = {
         "id": "TEXT", "as_of_date": "TEXT", "ticker": "TEXT", "setup": "TEXT", "close_price": "REAL",
         "score": "REAL", "detail": "TEXT", "created_at": "TEXT",
     }),
+    # learning: what each brief / scan setup did afterwards
+    "agent_outcomes": ("id", {
+        "id": "TEXT", "brief_id": "TEXT", "kind": "TEXT", "as_of_date": "TEXT", "ticker": "TEXT",
+        "strategy": "TEXT", "verdict": "TEXT", "horizon_days": "INTEGER", "ret_pct": "REAL",
+        "excess_pct": "REAL", "mae_pct": "REAL", "status": "TEXT", "desks": "TEXT", "updated_at": "TEXT",
+    }),
+    # learning: scorecards (per desk / verdict / setup / history backfill)
+    "agent_scorecard": ("id", {
+        "id": "TEXT", "as_of_date": "TEXT", "kind": "TEXT", "key": "TEXT", "status": "TEXT",
+        "horizon_days": "INTEGER", "n": "INTEGER", "mean_ret_pct": "REAL", "median_ret_pct": "REAL",
+        "hit_rate": "REAL", "mean_excess_pct": "REAL", "note": "TEXT",
+    }),
+    # always-on server: intraday paper journal (entries, exits, skips, blocks)
+    "agent_intraday": ("id", {
+        "id": "TEXT", "ts": "TEXT", "day": "TEXT", "ticker": "TEXT", "event": "TEXT", "reason": "TEXT",
+        "price": "REAL", "qty": "INTEGER", "ticket_id": "TEXT", "pnl": "REAL", "details": "TEXT",
+    }),
+    # rotation strategy paper account (portfolio/paper.py), one row per trading day
+    "rotation_snapshots": ("as_of_date", {
+        "as_of_date": "TEXT", "strategy": "TEXT", "label": "TEXT", "cash": "REAL", "holdings_value": "REAL",
+        "equity": "REAL", "benchmark_close": "REAL", "n_holdings": "INTEGER", "holdings": "TEXT",
+        "pending": "TEXT", "fills": "TEXT", "note": "TEXT", "state_json": "TEXT", "updated_at": "TEXT",
+    }),
 }
 
-JSON_COLUMNS = {"daily_snapshots": {"selected_strategies", "state_json"}, "agent_briefs": {"findings"}}
+JSON_COLUMNS = {"daily_snapshots": {"selected_strategies", "state_json"}, "agent_briefs": {"findings"}, "agent_outcomes": {"desks"},
+                "agent_intraday": {"details"},
+                "rotation_snapshots": {"holdings", "pending", "fills", "state_json"}}
 BOOL_COLUMNS = {"daily_snapshots": {"trading_halted"}, "backtest_results": {"qualified", "overfit_flag"}}
 
 

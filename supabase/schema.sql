@@ -145,3 +145,72 @@ create table if not exists public.agent_scans (
     created_at timestamptz
 );
 create index if not exists agent_scans_as_of_idx on public.agent_scans (as_of_date);
+
+-- Learning: what each brief / scan setup did afterwards (1, 5, 20 trading days).
+create table if not exists public.agent_outcomes (
+    id text primary key,
+    brief_id text,
+    kind text,
+    as_of_date date,
+    ticker text,
+    strategy text,
+    verdict text,
+    horizon_days integer,
+    ret_pct double precision,
+    excess_pct double precision,
+    mae_pct double precision,
+    status text,
+    desks jsonb,
+    updated_at timestamptz
+);
+create index if not exists agent_outcomes_as_of_idx on public.agent_outcomes (as_of_date);
+
+-- Learning: scorecards per desk / verdict / setup, plus history backfills.
+create table if not exists public.agent_scorecard (
+    id text primary key,
+    as_of_date date,
+    kind text,
+    key text,
+    status text,
+    horizon_days integer,
+    n integer,
+    mean_ret_pct double precision,
+    median_ret_pct double precision,
+    hit_rate double precision,
+    mean_excess_pct double precision,
+    note text
+);
+
+-- Always-on server: intraday paper journal.
+create table if not exists public.agent_intraday (
+    id text primary key,
+    ts timestamptz,
+    day date,
+    ticker text,
+    event text,
+    reason text,
+    price double precision,
+    qty integer,
+    ticket_id text,
+    pnl double precision,
+    details jsonb
+);
+create index if not exists agent_intraday_day_idx on public.agent_intraday (day);
+
+-- Rotation strategy paper account (separate Rs 10 lakh account), one row per trading day.
+create table if not exists public.rotation_snapshots (
+    as_of_date date primary key,
+    strategy text,
+    label text,
+    cash double precision,
+    holdings_value double precision,
+    equity double precision,
+    benchmark_close double precision,
+    n_holdings integer,
+    holdings jsonb,
+    pending jsonb,
+    fills jsonb,
+    note text,
+    state_json jsonb,
+    updated_at timestamptz
+);

@@ -252,6 +252,24 @@ def dedupe(items: list[NewsItem]) -> list[NewsItem]:
     return out
 
 
+# Group companies share a name ("SBI" vs "SBI Life", "Tata" vs "Tata Steel"): a headline about a
+# sister company must not count as news about this one.
+_SIBLING_WORDS = ("Life", "General", "Card", "Cards", "Mutual", "MF", "Securities", "Capital", "Finance",
+                  "Financial", "Housing", "Ventures", "Energy", "Power", "Green", "Ports", "Pharma", "Chemicals",
+                  "Consumer", "Insurance", "AMC", "Asset", "Global", "Realty", "Infra", "Steel", "Motors",
+                  "Elxsi", "Communications", "Technologies", "Cements")
+
+
+def about_sibling(title: str, name: str) -> bool:
+    """True when every mention of `name` in `title` is followed by a sister-company word."""
+    words = "|".join(_SIBLING_WORDS)
+    mentions = list(re.finditer(rf"\b{re.escape(name)}\b", title, re.I))
+    if not mentions:
+        return False
+    own = [m for m in mentions if not re.match(rf"\s+(?:{words})\b", title[m.end():])]
+    return not own
+
+
 def fetch_news(ticker: str, hours: int = 24, company: str | None = None, fetch: Fetch | None = None,
                now: dt.datetime | None = None) -> list[NewsItem]:
     """Headlines on `ticker` from the last `hours`, newest first.
@@ -279,6 +297,7 @@ def fetch_news(ticker: str, hours: int = 24, company: str | None = None, fetch: 
         raise FetchError("; ".join(errors))
     for e in errors:
         log.info("news %s: %s", sym, e)
+    items = [i for i in items if not (i.source != "NSE filing" and about_sibling(i.title, name))]
     return dedupe([i for i in items if cutoff <= i.published <= ahead])
 
 

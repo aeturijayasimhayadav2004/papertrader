@@ -138,6 +138,41 @@ agent:                      # the trading agent's desks, asked about every buy c
   scan_history_days: 400
   scan_top_n: 25
 
+portfolio:                  # rotation strategy, its own Rs 10 lakh paper account (portfolio/paper.py)
+  enabled: true
+  strategy: momentum_12_1_regime   # passed the out-of-sample bar on Nifty 100 (reports/rotation_research.md)
+  universe: nifty100
+  capital: 1000000
+  rebalance_band_pct: 1     # skip top-ups / trims smaller than 1% of equity
+  history_days: 500         # 12-1 momentum needs ~13 months of bars
+
+intraday:                   # always-on server only (docs/SERVER.md): opening-range breakout paper trading
+  enabled: true
+  mode: paper               # the only mode; anything else is refused
+  watchlist: nifty50
+  or_minutes: 15
+  stop_method: or_mid       # stop at the middle of the opening range
+  target_r: 1.5             # target = 1.5 x the risk
+  account: 1000000          # its own paper account (data/agent/intraday_ledger.json)
+  max_loss_per_trade: 1000
+  max_daily_loss: 3000
+  max_trades_per_day: 3
+  entry_start: "09:20"
+  entry_end: "14:30"
+  flat_by: "15:15"
+  min_p_target_minus_p_stop: 0.0   # time machine: target-first odds must be at least the stop-first odds
+  use_news_gate: true
+  use_events_gate: true
+
+brain:                      # optional: Claude reviews each agent brief and can only VETO a buy (docs/AGENT.md)
+  enabled: true             # runs only when ANTHROPIC_API_KEY is set (.env / GitHub secret); otherwise skipped
+  model: claude-opus-5-5    # or claude-haiku-5-5 (about 40x cheaper)
+  effort: low               # low keeps thinking short and cost about $0.02 per brief on Opus
+  veto_min_confidence: 0.7  # a veto this confident blocks the buy; a weaker one only warns
+  max_calls_per_run: 10
+  monthly_budget_usd: 5     # stop calling Claude once this month's spend reaches it
+  fallbacks: default        # server-side fallback model if a request is declined (Opus only); none = off
+
 notify:
   telegram: true            # sends only if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are set
 

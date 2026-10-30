@@ -7,4 +7,5 @@ pyyaml>=6.0
 python-dotenv>=1.0
 supabase>=2.4
 tzdata>=2024.1
+anthropic>=2.0          # optional LLM brain; used only when ANTHROPIC_API_KEY is set
 pytest>=7.4
