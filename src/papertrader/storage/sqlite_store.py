@@ -57,6 +57,10 @@ class SQLiteStore:
             marks = ",".join("?" * len(keys))
             where = f'WHERE "{pk}" NOT IN ({marks})' if keys else ""
             self.conn.execute(f'DELETE FROM "{op.table}" {where}', keys)
+        elif op.kind == "delete_eq":
+            for f in op.rows:
+                self.conn.execute(f'DELETE FROM "{op.table}" WHERE "{f["column"]}" = ?', [f["value"]])
+            return
         elif op.kind != "upsert":
             raise ValueError(f"unknown op {op.kind}")
         for row in op.rows:

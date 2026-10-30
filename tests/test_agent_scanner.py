@@ -159,3 +159,11 @@ def test_describe_hits():
     assert scanner.describe_hits([]) == "No charts matched a setup rule."
     text = scanner.describe_hits(scanner.scan_orb({"L.NS": LONG}, day=DAY, at=dt.time(10, 0)))
     assert "orb_long" in text and "not a buy" in text and "IST" in text
+
+
+def test_scan_orb_respects_latest_entry():
+    closes = [100.2, 100.4, 100.0] + [100.5] * 62 + [103.0]        # bar 65 starts 14:40, closes 14:45
+    late = intraday(closes, [101, 100.8, 100.6] + [100.9] * 62 + [103.2], [99, 99.3, 99.5] + [99.8] * 63)
+    assert scanner.scan_orb({"L.NS": late}, day=DAY, at=dt.time(15, 0)) == []
+    (hit,) = scanner.scan_orb({"L.NS": late}, day=DAY, at=dt.time(15, 0), latest_entry=dt.time(15, 0))
+    assert hit["setup"] == "orb_long" and hit["time"] == "14:45"

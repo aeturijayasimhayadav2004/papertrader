@@ -133,6 +133,16 @@ def test_replay_orb_history_outcomes():
     assert res["win_rate"] == 0.5 and res["avg_r"] == pytest.approx(0.0)
 
 
+def test_replay_orb_history_low_break_expires_and_incomplete_range_skipped():
+    rng3 = [(100, 101, 99, 100.5)] * 3
+    low_first = rng3 + [(100, 100, 98, 98.5), (98.5, 102.5, 98.4, 102.0)] + [(102, 102.2, 101.8, 102)] * 70
+    no_range = [(100, 101, 99, 100.5)] * 2                       # only the 09:15 / 09:20 bars, then gap
+    bars = pd.concat([_day(dt.date(2026, 10, 26), low_first), _day(dt.date(2026, 10, 27), no_range)])
+    res = replay_orb_history(bars, or_minutes=15, stop_method="or_mid", target_r=1.0)
+    assert res["sessions"] == 1 and res["fired"] == 0                  # was a long in the old replay
+    assert res["days"][0]["outcome"] == "no_trigger"
+
+
 class EveryTen(Strategy):
     """Buy every 10th bar, sell 5 bars later (a deliberately dumb rule)."""
     name = "every_ten"

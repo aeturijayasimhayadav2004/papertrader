@@ -40,13 +40,15 @@ import pandas as pd
 from papertrader import protections
 from papertrader.backtest import market_regime
 from papertrader.broker import BUY, SELL, BrokerError, PaperBroker
+from papertrader.costs import split_ratio
 from papertrader.config import Config
-from papertrader.data import DataError, load_prices
+from papertrader.data import DataError, complete_calendar, load_prices
 from papertrader.indicators import atr
 from papertrader.notify import format_summary, send_telegram
 from papertrader.risk import RiskManager
 from papertrader.selection import Selection, evaluate_strategies
-from papertrader.storage import StateUnavailableError, Store, WriteOp, replace, upsert
+from papertrader.agent import market
+from papertrader.storage import StateUnavailableError, Store, WriteOp, delete_eq, replace, upsert
 from papertrader.strategies import Signal, Strategy, build_strategies
 
 log = logging.getLogger("papertrader.runner")
@@ -118,7 +120,7 @@ class DailyRunner:
 
     def kill_switch(self) -> str:
         """Reason new buys are switched off by the operator, or ''."""
-        if os.environ.get("PAPERTRADER_KILL_SWITCH", "").strip() in ("1", "true", "yes"):
+        if os.environ.get("PAPERTRADER_KILL_SWITCH", "").strip().lower() in ("1", "true", "yes", "on"):
             return "Kill switch is ON (PAPERTRADER_KILL_SWITCH): no new buys; exits and stops still run."
         if self.cfg.trading.kill_switch_file.exists():
             return (f"Kill switch is ON (file {self.cfg.trading.kill_switch_file.name} exists): "
@@ -132,6 +134,11 @@ class DailyRunner:
         summary = RunSummary(run_id, "failed", "")
         log.info("=== PAPER TRADING run %s (no real money) ===", run_id)
         try:
+            busy = self.store.other_run_active(run_id)
+            if busy:
+                summary.status, summary.message = "noop", f"Another run is in progress ({busy}); not starting a second."
+                log.warning(summary.message)
+                return summary
             self._write_run(run_id, started, None, "running", None, 0, "Run started.")
             self._run(summary, force, refresh)
         except StateUnavailableError as exc:
@@ -173,7 +180,7 @@ class DailyRunner:
             raise DataError("No price data for any stock in the universe: " + "; ".join(warnings))
         bench = prices.get(cfg.benchmark)
 
-        calendar = sorted(set().union(*(df.index for df in universe.values())))
+        calendar = complete_calendar(universe)
         last_bar = calendar[-1].date()
         saved = self.store.load_latest_state(before=last_bar if force else None)
 
@@ -193,15 +200,29 @@ class DailyRunner:
             log.info("Loaded state as of %s (equity Rs %s).", saved_date, f"{prev_equity:,.0f}")
 
         summary.as_of_date = last_bar
+        if not market.holidays_known(last_bar.year):
+            warn = (f"NSE holidays for {last_bar.year} are not in agent/market.py yet: month-end and "
+                    "results-blackout dates may be off. Add them from NSE's holiday circular.")
+            log.warning(warn)
+            summary.events.append(warn)
         if not days:
             summary.status = "noop"
             summary.message = f"Already processed the latest completed trading day ({last_bar}); nothing to do."
             return
 
         for day in days:
-            self._agent_live = self.coordinator is not None and day == days[-1]
+            # Agent desks read today's news: only for the latest day, and only before the next session
+            # opens (a run delayed past the next open would judge yesterday's close with later news).
+            next_open = dt.datetime.combine(market.next_trading_day(day.date()), market.OPEN, market.IST)
+            self._agent_live = self.coordinator is not None and day == days[-1] and self.now < next_open
+            if self.coordinator is not None and day == days[-1] and not self._agent_live:
+                log.warning("Run is past the next session's open: agent desks skipped for %s.", day.date())
             ops, selection_state, prev_equity, decisions = self._process_day(
                 day, universe, bench, broker, selection_state, prev_equity, history_state, summary.events)
+            if force:  # a recompute replaces the day: clear rows the first pass made but this one may not
+                d = day.date()
+                ops = [delete_eq("decisions", "as_of_date", d), delete_eq("orders", "created_date", d),
+                       delete_eq("agent_briefs", "as_of_date", d)] + ops
             self.store.write(ops)
             summary.days_processed.append(day.date())
             summary.decisions = decisions
@@ -235,6 +256,16 @@ class DailyRunner:
             ops.append(upsert("backtest_results", selection.to_rows()))
             log.info("Strategy selection re-ranked: %s", selection.summary())
         selected: list[str] = selection_state["selected"]
+
+        # 1b) splits / bonuses: rescale held positions before any stop is checked
+        for t, pos in list(broker.positions.items()):
+            h = history.get(t)
+            if h is not None and len(h) >= 2:
+                ratio = split_ratio(pos.last_price, float(h["Close"].iloc[-2]))
+                if ratio:
+                    note = broker.apply_split(t, ratio)
+                    log.warning(note)
+                    events.append(f"{d} {note}")
 
         # 2) fills at today's open, 3) stops
         for o in broker.fill_pending(d, {t: bar["Open"] for t, bar in today.items()}):
@@ -442,6 +473,15 @@ class DailyRunner:
                     if blocked:
                         add(ticker, strat.name, sig.value, A_BLOCKED, f"{why} Blocked: {blocked}", close)
                         continue
+                    atr_now = self._atr(history[ticker])
+                    rd = self.risk.check_new_position(
+                        price=close, equity=equity, cash_available=broker.cash - broker.reserved_cash(),
+                        open_positions=len(broker.positions), pending_buys=pending_buys,
+                        halted=False, atr_at_signal=atr_now, orders_today=orders_today)
+                    if not rd.allowed:
+                        add(ticker, strat.name, sig.value, A_BLOCKED, f"{why} Blocked by risk rules: {rd.reason}", close)
+                        continue
+                    # The agent is asked only about buys that would really be placed (saves LLM calls).
                     agent_note = ""
                     if self._agent_live:
                         b = self.coordinator.brief(d, ticker, strat, history[ticker], reason=why)
@@ -451,14 +491,6 @@ class DailyRunner:
                                 close)
                             continue
                         agent_note = f" {b.summary()}"
-                    atr_now = self._atr(history[ticker])
-                    rd = self.risk.check_new_position(
-                        price=close, equity=equity, cash_available=broker.cash - broker.reserved_cash(),
-                        open_positions=len(broker.positions), pending_buys=pending_buys,
-                        halted=False, atr_at_signal=atr_now, orders_today=orders_today)
-                    if not rd.allowed:
-                        add(ticker, strat.name, sig.value, A_BLOCKED, f"{why} Blocked by risk rules: {rd.reason}", close)
-                        continue
                     try:
                         broker.place_order(d, ticker, BUY, rd.qty, strat.name, why, max_notional=rd.max_notional,
                                            atr_at_signal=atr_now)

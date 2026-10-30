@@ -136,6 +136,9 @@ class BrainConfig:
         cfg.provider = str(cfg.provider).strip().lower()
         if cfg.provider not in ("anthropic", "groq"):
             raise ValueError(f"brain.provider must be anthropic or groq, not {cfg.provider!r}")
+        if cfg.provider == "groq" and ("model" not in d or cfg.model.startswith("claude")):
+            from papertrader.agent.groq_client import DEFAULT_MODEL
+            cfg.model = DEFAULT_MODEL   # a Claude model name means nothing to Groq
         cfg.effort = str(cfg.effort).strip().lower()
         if cfg.effort not in ("low", "medium", "high", "xhigh", "max"):
             raise ValueError(f"agent.brain.effort: bad value {cfg.effort!r}")

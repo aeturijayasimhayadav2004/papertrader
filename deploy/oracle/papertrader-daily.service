@@ -1,8 +1,8 @@
-# Backup for the GitHub Actions daily paper run. Disabled by default.
-# GitHub Actions stays the primary. run_daily.py skips days it already processed, so
-# running both is safe (idempotent): whichever runs second does nothing.
+# The daily paper run on the always-on server (on time, 16:45 IST). GitHub Actions runs the
+# same job hours later as a backup. run_daily.py skips days it already processed, so the
+# second runner finds nothing to do (idempotent).
 [Unit]
-Description=PaperTrader daily paper run (backup for GitHub Actions)
+Description=PaperTrader daily paper run (primary; GitHub Actions is the backup)
 Wants=network-online.target
 After=network-online.target
 

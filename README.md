@@ -25,7 +25,7 @@ No broker, no broker API keys, no real orders.
    low-profit lock. Plus a **market regime filter** (no new buys while Nifty is below its 200-day average),
    a bad-data guard and an operator **kill switch**. These only block new buys; exits always run.
 8. **Paper broker** (`broker.py`): cash, positions, orders, fills at the next open. Implements the
-   `BrokerAPI` interface a future live adapter must match.
+   paper account. Real brokers plug in through `live/interface.BrokerSession` (see [docs/GO_LIVE.md](docs/GO_LIVE.md)).
 9. **Daily runner** (`runner.py`, `scripts/run_daily.py`): processes every new completed trading day,
    logs every decision with its reason, writes to SQLite + Supabase, sends a Telegram summary if configured.
 10. **Dashboard** (`dashboard/`): Streamlit, read-only Supabase key, password-gated.

@@ -202,7 +202,7 @@ class Config:
     agent: AgentConfig = field(default_factory=AgentConfig)
     # Raw sections parsed by their own modules (each has a from_dict with defaults):
     # brain -> agent.brain.BrainConfig, intraday -> agent.intraday_runner.IntradayConfig,
-    # portfolio -> rotation strategy settings, learning -> agent.learning options.
+    # portfolio -> portfolio.paper.PortfolioConfig.
     sections: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
@@ -270,6 +270,8 @@ def parse_config(raw: dict[str, Any]) -> Config:
         raise ConfigError("selection.method must be 'holdout' or 'walk_forward'")
     if selection.criterion not in ("return", "sharpe"):
         raise ConfigError("selection.criterion must be 'return' or 'sharpe'")
+    if selection.rerank_every_days < 1 or selection.min_trades < 0:
+        raise ConfigError("selection.rerank_every_days must be >= 1 and min_trades >= 0")
     if selection.wf_fold_months < 1 or not 0 <= selection.wf_min_fold_win_rate <= 1:
         raise ConfigError("selection.wf_fold_months must be >= 1 and wf_min_fold_win_rate in [0, 1]")
     risk = RiskConfig(
@@ -370,5 +372,5 @@ def parse_config(raw: dict[str, Any]) -> Config:
         trading=trading,
         notify=notify,
         agent=agent,
-        sections={k: dict(raw.get(k) or {}) for k in ("brain", "intraday", "portfolio", "learning")},
+        sections={k: dict(raw.get(k) or {}) for k in ("brain", "intraday", "portfolio")},
     )

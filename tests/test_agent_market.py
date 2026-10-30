@@ -179,18 +179,51 @@ def test_load_intraday_cache_and_fallback(tmp_path):
     assert intraday.load_intraday("TCS.NS", downloader=broken, cache_dir=tmp_path, now=later).empty
 
 
-def test_load_intraday_short_ttl_while_open(tmp_path):
+def ists(h, mi, sec, day=dt.date(2026, 10, 28)):
+    return dt.datetime.combine(day, dt.time(h, mi, sec), IST)
+
+
+def test_load_intraday_fresh_only_after_latest_bar_boundary(tmp_path):
     calls = []
 
     def dl(ticker, interval, days):
         calls.append(1)
         return raw_5m()
 
-    intraday.load_intraday("A.NS", downloader=dl, cache_dir=tmp_path, now=ist(2026, 10, 28, 11, 0))
-    intraday.load_intraday("A.NS", downloader=dl, cache_dir=tmp_path, now=ist(2026, 10, 28, 11, 3))
-    assert len(calls) == 1
-    intraday.load_intraday("A.NS", downloader=dl, cache_dir=tmp_path, now=ist(2026, 10, 28, 11, 6))
+    intraday.load_intraday("A.NS", downloader=dl, cache_dir=tmp_path, now=ists(11, 0, 45))
+    intraday.load_intraday("A.NS", downloader=dl, cache_dir=tmp_path, now=ists(11, 3, 0))
+    assert len(calls) == 1                                   # same bar boundary: cache reused
+    # Regression: the 11:00 bar closed at 11:05. A cycle at 11:05:40 must not reuse the
+    # 11:00:45 download (the old 5-minute TTL did: 4m55s old), or it misses that bar.
+    intraday.load_intraday("A.NS", downloader=dl, cache_dir=tmp_path, now=ists(11, 5, 40))
     assert len(calls) == 2
+    intraday.load_intraday("A.NS", downloader=dl, cache_dir=tmp_path, now=ists(11, 6, 0))
+    assert len(calls) == 2
+    # Fetched inside the 30 s grace after a boundary: not trusted for that boundary.
+    intraday.load_intraday("B.NS", downloader=dl, cache_dir=tmp_path, now=ists(11, 10, 10))
+    intraday.load_intraday("B.NS", downloader=dl, cache_dir=tmp_path, now=ists(11, 10, 50))
+    assert len(calls) == 4
+
+
+def test_load_intraday_refetches_when_just_closed_bar_missing(tmp_path):
+    calls = []
+
+    def lagging(ticker, interval, days):                     # Yahoo has not published the 10:55 bar yet
+        calls.append(1)
+        raw = raw_5m()
+        return raw[raw.index < pd.Timestamp(ists(10, 55, 0))]
+
+    intraday.load_intraday("A.NS", downloader=lagging, cache_dir=tmp_path, now=ists(11, 0, 40))
+    intraday.load_intraday("A.NS", downloader=lagging, cache_dir=tmp_path, now=ists(11, 1, 20))
+    assert len(calls) == 1                                   # within the 60 s retry TTL
+    intraday.load_intraday("A.NS", downloader=lagging, cache_dir=tmp_path, now=ists(11, 2, 0))
+    assert len(calls) == 2                                   # still missing the 10:55 bar: fetch again
+
+
+def test_latest_boundary():
+    assert intraday.latest_boundary(ists(11, 7, 59)) == ists(11, 5, 0)
+    assert intraday.latest_boundary(ists(9, 15, 0)) == ists(9, 15, 0)
+    assert intraday.latest_boundary(ists(9, 16, 30), "1m") == ists(9, 16, 0)
 
 
 def test_load_intraday_clamps_days_and_drops_future(tmp_path):
@@ -209,11 +242,9 @@ def test_load_intraday_clamps_days_and_drops_future(tmp_path):
     assert seen["days"] == 7
 
 
-def test_session_days_and_bars_on():
+def test_bars_on():
     a = intraday.clean_intraday(raw_5m(dt.date(2026, 10, 27)))
     b = intraday.clean_intraday(raw_5m(dt.date(2026, 10, 28)))
     both = pd.concat([a, b])
-    assert intraday.session_days(both) == [dt.date(2026, 10, 27), dt.date(2026, 10, 28)]
     assert len(intraday.bars_on(both, dt.date(2026, 10, 28))) == 75
     assert intraday.bars_on(both, dt.date(2026, 10, 29)).empty
-    assert intraday.session_days(intraday.empty_frame()) == []

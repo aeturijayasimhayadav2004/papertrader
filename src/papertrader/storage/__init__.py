@@ -12,7 +12,7 @@ import os
 from typing import Protocol
 
 from papertrader.config import PROJECT_ROOT, Config
-from papertrader.storage.schema import WriteOp, replace, upsert
+from papertrader.storage.schema import WriteOp, delete_eq, replace, upsert
 from papertrader.storage.sqlite_store import SavedState, SQLiteStore
 
 log = logging.getLogger(__name__)
@@ -25,13 +25,18 @@ class StateUnavailableError(RuntimeError):
 class RemoteStore(Protocol):
     def apply(self, ops: list[WriteOp]) -> None: ...
     def latest_state(self, before: dt.date | None = None) -> SavedState | None: ...
+    def running_since(self, since_iso: str) -> list[dict]: ...
 
 
 class Store:
-    def __init__(self, sqlite: SQLiteStore, remote: RemoteStore | None = None, remote_error: str | None = None):
+    def __init__(self, sqlite: SQLiteStore, remote: RemoteStore | None = None, remote_error: str | None = None,
+                 require_remote: bool = False):
         self.sqlite = sqlite
         self.remote = remote
         self.remote_error = remote_error  # set when Supabase was wanted but could not be created
+        # Supabase is the shared source of truth between runners (server + GitHub). When it is
+        # required, a failed read refuses the run instead of trusting an older local copy.
+        self.require_remote = require_remote
         self._sync_failed = False
 
     @classmethod
@@ -53,7 +58,7 @@ class Store:
         try:
             from papertrader.storage.supabase_store import SupabaseStore
 
-            return cls(sqlite, SupabaseStore(url, key))
+            return cls(sqlite, SupabaseStore(url, key), require_remote=cfg.storage.require_supabase)
         except Exception as exc:
             log.warning("Could not create Supabase client (%s): using local SQLite only for now.", exc)
             if cfg.storage.require_supabase:
@@ -85,6 +90,24 @@ class Store:
         self.sqlite.apply(ops, queue_for_sync=self.remote_wanted)
         self.sync()
 
+    def other_run_active(self, run_id: str, minutes: int = 30) -> str | None:
+        """Another runner's run that started in the last `minutes` and is still running, or None.
+
+        Two hosts (the always-on server and GitHub Actions) share Supabase; this keeps them from
+        processing the same day at the same moment. Without Supabase there is only one host.
+        """
+        if self.remote is None:
+            return None
+        import datetime as _dt
+        since = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(minutes=minutes)).isoformat()
+        try:
+            rows = self.remote.running_since(since)
+        except Exception as exc:
+            log.warning("Could not check for another active run: %s", exc)
+            return None
+        others = [r for r in rows if r.get("run_id") != run_id]
+        return f"{others[0]['run_id']} on {others[0].get('host') or 'another host'}" if others else None
+
     def pending_sync(self) -> int:
         return self.sqlite.count("outbox")
 
@@ -101,6 +124,10 @@ class Store:
             remote_err = self.remote_error
         local_state = self.sqlite.latest_state(before)
 
+        if remote_err and self.require_remote:
+            raise StateUnavailableError(
+                f"Supabase is required but could not be read ({remote_err}). Refusing to trade from the local "
+                "copy, which another runner may have overtaken.")
         if remote_err and local_state is None:
             raise StateUnavailableError(
                 f"Supabase is unreachable ({remote_err}) and there is no local state. Refusing to trade "
@@ -110,4 +137,4 @@ class Store:
         return max(candidates, key=lambda s: s[0]) if candidates else None
 
 
-__all__ = ["Store", "SQLiteStore", "StateUnavailableError", "WriteOp", "upsert", "replace", "SavedState"]
+__all__ = ["Store", "SQLiteStore", "StateUnavailableError", "WriteOp", "upsert", "replace", "delete_eq", "SavedState"]

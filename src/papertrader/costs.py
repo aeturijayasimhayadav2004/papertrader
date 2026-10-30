@@ -112,6 +112,24 @@ def india_intraday(
     )
 
 
+def split_ratio(saved_price: float | None, fresh_price: float | None, threshold: float = 0.15) -> float | None:
+    """Ratio fresh / saved for the SAME day's close when it shows a split or bonus, else None.
+
+    Prices are split-adjusted, so after a split or bonus Yahoo rescales past closes. A held
+    position stores yesterday's close as it was then; if the fresh download shows that same
+    close more than `threshold` (15%) away, the past was rescaled (a real move cannot change
+    a past close). The ratio is snapped to a simple fraction p/q (p, q <= 10) when one is
+    within 1%, e.g. a 1:1 bonus gives 1/2 and a 1:5 split gives 1/5.
+    """
+    if not saved_price or not fresh_price or saved_price <= 0 or fresh_price <= 0:
+        return None
+    r = fresh_price / saved_price
+    if abs(r - 1.0) <= threshold:
+        return None
+    best = min(((p / q, abs(p / q - r) / r) for p in range(1, 11) for q in range(1, 11)), key=lambda x: x[1])
+    return best[0] if best[1] <= 0.01 else r
+
+
 def as_cost_model(cost: "CostModel | float") -> CostModel:
     """Accept a CostModel or a flat per-side fraction (older call sites and tests)."""
     return cost if isinstance(cost, CostModel) else flat(float(cost))

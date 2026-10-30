@@ -64,7 +64,7 @@ def test_stop_loss_fills_at_stop_or_gap_open(b):
     b.place_order(D1, "X", BUY, 10, "s", "why")
     b.place_order(D1, "Y", BUY, 10, "s", "why")
     b.fill_pending(D2, {"X": 100, "Y": 100})
-    trades = b.check_stops(D3, opens={"X": 99, "Y": 90}, lows={"X": 94, "Y": 89})
+    trades = b.check_exits(D3, opens={"X": 99, "Y": 90}, highs={}, lows={"X": 94, "Y": 89})
     by = {t.ticker: t for t in trades}
     assert by["X"].exit_price == pytest.approx(95) and by["X"].exit_reason == "stop_loss"
     assert by["Y"].exit_price == 90  # gapped below the stop
@@ -76,7 +76,7 @@ def test_stop_loss_fills_at_stop_or_gap_open(b):
 def test_no_stop_when_low_stays_above(b):
     b.place_order(D1, "X", BUY, 10, "s", "why")
     b.fill_pending(D2, {"X": 100})
-    assert b.check_stops(D3, {"X": 99}, {"X": 95.5}) == []
+    assert b.check_exits(D3, {"X": 99}, {}, {"X": 95.5}) == []
 
 
 def test_invalid_orders_rejected(b):

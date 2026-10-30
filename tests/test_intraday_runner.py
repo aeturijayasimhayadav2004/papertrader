@@ -308,7 +308,7 @@ def test_resolve_exit_and_completed_bars():
 
 def test_config_from_dict_parses_and_validates():
     cfg = IntradayConfig.from_dict({"entry_start": "09:30", "flat_by": "15:10", "watchlist": "Nifty100",
-                                    "unknown_key": 1, "tickers": ["infy"]})
+                                    "tickers": ["infy"]})
     assert cfg.entry_start == dt.time(9, 30) and cfg.flat_by == dt.time(15, 10)
     assert cfg.watchlist == "nifty100" and cfg.tickers == ["INFY.NS"]
     assert IntradayConfig.from_dict(None).watchlist == "nifty50"
@@ -357,3 +357,84 @@ def test_sync_upserts_and_never_raises(tmp_path, monkeypatch):
 
     monkeypatch.setattr(storage_mod.Store, "from_config", classmethod(lambda cls, cfg: Broken()))
     assert loop.sync_journal(s, DAY) == -1
+
+
+def test_config_from_dict_rejects_unknown_keys_and_non_positive_limits():
+    with pytest.raises(ValueError, match="unknown key"):
+        IntradayConfig.from_dict({"max_daily_los": 3000})                 # a typo must not fall back silently
+    for key in ("account", "max_loss_per_trade", "max_daily_loss", "max_trades_per_day"):
+        for bad in (0, -1, "abc", None):
+            with pytest.raises(ValueError, match=key):
+                IntradayConfig.from_dict({key: bad})
+    assert IntradayConfig.from_dict({"account": 500000, "max_trades_per_day": 2}).account == 500000
+
+
+def test_project_config_yaml_intraday_section_parses():
+    import yaml
+    from pathlib import Path
+    raw = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text(encoding="utf-8"))
+    cfg = IntradayConfig.from_dict(raw.get("intraday") or {})
+    assert cfg.mode == "paper" and cfg.entry_end == dt.time(14, 30) and cfg.max_daily_loss > 0
+
+
+def test_kill_switch_env_any_case_and_configured_file(tmp_path, monkeypatch):
+    from papertrader.agent import intraday_runner as ir
+    import papertrader.config as config_mod
+
+    switch = tmp_path / "STOP_NOW"
+
+    class Trading:
+        kill_switch_file = switch
+
+    class Cfg:
+        trading = Trading()
+
+    monkeypatch.setattr(config_mod, "load_config", lambda path=None: Cfg())
+    monkeypatch.delenv("PAPERTRADER_KILL_SWITCH", raising=False)
+    assert ir.kill_switch_file() == switch
+    assert ir._kill_switch_on() is False
+    for v in ("1", "TRUE", " Yes ", "on", "ON"):
+        monkeypatch.setenv("PAPERTRADER_KILL_SWITCH", v)
+        assert ir._kill_switch_on() is True
+    for v in ("0", "false", "", "off"):
+        monkeypatch.setenv("PAPERTRADER_KILL_SWITCH", v)
+        assert ir._kill_switch_on() is False
+    switch.write_text("stop")
+    assert ir._kill_switch_on() is True                                   # trading.kill_switch_file honoured
+
+    def broken(path=None):
+        raise FileNotFoundError("no config")
+    monkeypatch.setattr(config_mod, "load_config", broken)
+    assert ir.kill_switch_file() == ir.PROJECT_ROOT / "KILL_SWITCH"       # falls back
+
+
+def test_entry_time_is_fill_bar_end_so_a_stop_in_the_next_bar_is_seen(tmp_path):
+    """Regression: a stale download at the 09:45 cycle still ends with the 09:35 bar. The fill is that
+    bar's close, so the entry is stamped 09:40 (its end), not 09:45 (the wall clock). The 09:40 bar,
+    which touched the stop, must then be checked by the next cycle."""
+    full = pd.concat([history(), today("flat")])
+    i940 = full.index.get_loc(pd.Timestamp(at(9, 40)))
+    full.iloc[i940, full.columns.get_indexer(["Open", "High", "Low", "Close"])] = [1004, 1005, 999, 1001]
+    stale = full[full.index < pd.Timestamp(at(9, 40))]
+
+    def loader(t, days, now):
+        return stale if now < at(9, 50) else full
+
+    s = IntradaySession(IntradayConfig(tickers=[TICKER], min_p_target_minus_p_stop=None), now=at(9, 45),
+                        bars_loader=loader, news_fn=lambda t, n: Finding("news", OK, "ok"),
+                        events_fn=lambda t, d: Finding("events", OK, "ok"), notifier=None,
+                        state_dir=tmp_path, kill_switch=lambda: False)
+    run(s, at(9, 45))
+    rec = load_ledger(tmp_path / "intraday_ledger.json")[0]
+    assert rec["entry_price"] == 1004.0 and rec["entry_time"].startswith(f"{DAY}T09:40")
+    run(s, at(9, 50))
+    rec = load_ledger(tmp_path / "intraday_ledger.json")[0]
+    assert rec["status"] == "closed" and rec["exit_reason"] == "stop" and rec["exit_price"] == 1000.0
+    assert rec["exit_time"].startswith(f"{DAY}T09:45")
+
+
+def test_resolve_exit_reasons_match_exits_rule():
+    rec = {"entry_time": at(9, 40).isoformat(), "stop_loss": 1000.0, "target": 1010.0}
+    assert resolve_exit(rec, today("both"), at(9, 50), dt.time(15, 15))[:2] == (1000.0, "stop")
+    assert resolve_exit(rec, today("gap"), at(9, 50), dt.time(15, 15))[:2] == (997.0, "stop")
+    assert resolve_exit(rec, today("target"), at(9, 55), dt.time(15, 15))[:2] == (1010.0, "target")

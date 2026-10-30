@@ -109,7 +109,7 @@ class Coordinator:
                     log.warning("Desk %s failed for %s: %s", name, ticker, exc)
                     self._cache[key] = unknown(name, f"{type(exc).__name__}: {exc}")
             findings.append(self._cache[key])
-        if self.brain is not None:
+        if self.brain is not None and not info_only:   # the LLM is spent only on buys that would happen
             key = ("brain", f"{ticker}|{strategy.name}", day)
             if key not in self._cache:
                 try:

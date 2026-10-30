@@ -1,7 +1,7 @@
-# 16:45 IST Monday-Friday. NOT enabled by setup.sh. Turn on only as a backup:
+# 16:45 IST Monday-Friday (after the 15:45 bar cut-off). Enable once after setup:
 #   sudo systemctl enable --now papertrader-daily.timer
 [Unit]
-Description=PaperTrader daily paper run at 16:45 IST (backup)
+Description=PaperTrader daily paper run at 16:45 IST
 
 [Timer]
 OnCalendar=Mon..Fri *-*-* 16:45:00 Asia/Kolkata

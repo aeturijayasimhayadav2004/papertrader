@@ -52,17 +52,19 @@ from papertrader.agent import market
 from papertrader.agent.budget import bracket_ticket, size_position
 from papertrader.agent.entry import check_orb
 from papertrader.agent.exitplan import PlanError, plan_trade
-from papertrader.agent.market import CLOSE, IST, OPEN
+from papertrader.agent.market import IST
 from papertrader.agent.riskcheck import RiskLimits, check_ticket
 from papertrader.agent.scanner import scan_orb
 from papertrader.agent.tickets import (approve, close_paper, execute_paper, load_ledger, refuse_live)
 from papertrader.agent.types import BLOCK, UNKNOWN, Finding, symbol, yahoo
 from papertrader.config import PROJECT_ROOT
 from papertrader.costs import india_intraday
+from papertrader.exits import intraday_exit
 
 log = logging.getLogger(__name__)
 
-BAR = dt.timedelta(minutes=5)
+BAR_MINUTES = 5
+BAR = dt.timedelta(minutes=BAR_MINUTES)
 DEFAULT_STATE_DIR = PROJECT_ROOT / "data" / "agent"
 JOURNAL_NAME = "intraday_journal.jsonl"
 LEDGER_NAME = "intraday_ledger.json"
@@ -131,6 +133,14 @@ class IntradayConfig:
             raise ValueError(f"intraday.watchlist must be one of {', '.join(WATCHLISTS)}")
         if self.stop_method not in ("or_mid", "or_low", "pct"):
             raise ValueError("intraday.stop_method must be or_mid, or_low or pct")
+        for name in ("account", "max_loss_per_trade", "max_daily_loss", "max_trades_per_day"):
+            v = getattr(self, name)
+            try:
+                ok = not isinstance(v, bool) and float(v) > 0
+            except (TypeError, ValueError):
+                ok = False
+            if not ok:
+                raise ValueError(f"intraday.{name} must be a positive number, got {v!r}")
         for name in ("entry_start", "entry_end", "flat_by"):
             setattr(self, name, _clock(getattr(self, name)))
         if not self.entry_start < self.entry_end <= self.flat_by:
@@ -139,13 +149,15 @@ class IntradayConfig:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any] | None) -> "IntradayConfig":
-        """Build from a plain dict (config.yaml `intraday:`). Unknown keys are ignored with a warning."""
+        """Build from a plain dict (config.yaml `intraday:`). Unknown keys raise ValueError (a typo
+        such as `max_daily_los` must not silently fall back to a default)."""
         d = dict(d or {})
         names = {f.name for f in fields(cls)}
         extra = sorted(set(d) - names)
         if extra:
-            log.warning("intraday config: ignoring unknown keys %s", ", ".join(extra))
-        return cls(**{k: v for k, v in d.items() if k in names})
+            raise ValueError(f"intraday config: unknown key(s) {', '.join(extra)}; "
+                             f"known keys are {', '.join(sorted(names))}")
+        return cls(**d)
 
     def limits(self) -> RiskLimits:
         return RiskLimits(max_loss_per_trade=self.max_loss_per_trade, max_daily_loss=self.max_daily_loss,
@@ -226,10 +238,27 @@ def default_universe(name: str) -> list[str]:
     return load_universe(name)
 
 
-def _kill_switch_on() -> bool:
-    if os.environ.get("PAPERTRADER_KILL_SWITCH", "").strip().lower() in ("1", "true", "yes"):
+KILL_SWITCH_ENV = "PAPERTRADER_KILL_SWITCH"
+KILL_SWITCH_ON = ("1", "true", "yes", "on")
+
+
+def kill_switch_file(config_path: str | Path | None = None) -> Path:
+    """config.yaml `trading.kill_switch_file` (via papertrader.config.load_config), else PROJECT_ROOT/KILL_SWITCH."""
+    try:
+        from papertrader.config import load_config
+        path = getattr(getattr(load_config(config_path), "trading", None), "kill_switch_file", None)
+        if path:
+            return Path(path)
+    except Exception as exc:  # a broken config must not hide the default switch
+        log.warning("kill switch: could not read trading.kill_switch_file (%s); using KILL_SWITCH", exc)
+    return PROJECT_ROOT / "KILL_SWITCH"
+
+
+def _kill_switch_on(config_path: str | Path | None = None) -> bool:
+    """On when env PAPERTRADER_KILL_SWITCH is 1/true/yes/on (any case) or the configured file exists."""
+    if os.environ.get(KILL_SWITCH_ENV, "").strip().lower() in KILL_SWITCH_ON:
         return True
-    return (PROJECT_ROOT / "KILL_SWITCH").exists()
+    return kill_switch_file(config_path).exists()
 
 
 # ---------------------------------------------------------------- bars
@@ -240,15 +269,17 @@ def completed_bars(bars: pd.DataFrame | None, now: dt.datetime) -> pd.DataFrame:
         return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
     b = entry_mod.as_ist_index(bars)
     b = b[~b.index.duplicated(keep="last")].sort_index()
-    return b[b.index + BAR <= now]
+    return entry_mod.completed(b, now, BAR_MINUTES)
 
 
 def resolve_exit(rec: dict[str, Any], bars: pd.DataFrame, now: dt.datetime,
                  flat_by: dt.time) -> tuple[float, str, dt.datetime] | None:
     """(price, reason, when) for an open long paper trade, or None while it stays open.
 
-    Bars that END after the entry are checked in order up to the flat-by time; in each,
-    the stop is checked before the target. Gaps fill at the bar's open.
+    Bars that END after the entry are checked in order up to the flat-by time, by
+    exits.intraday_exit: the stop before the target, gaps fill at the bar's open.
+    The entry time is the END of the bar whose close was the fill, so every later
+    bar is checked (none can slip between the fill and the cycle that made it).
     """
     entry_t = dt.datetime.fromisoformat(rec["entry_time"]).astimezone(IST)
     day = entry_t.date()
@@ -259,12 +290,10 @@ def resolve_exit(rec: dict[str, Any], bars: pd.DataFrame, now: dt.datetime,
         ends = b.index + BAR
         live = b[(ends > entry_t) & (ends <= flat_dt)]
         for start, bar in live.iterrows():
-            o, h, lo = float(bar["Open"]), float(bar["High"]), float(bar["Low"])
-            when = min(start + BAR, now)
-            if lo <= stop:
-                return (o if o <= stop else stop), "stop", when
-            if h >= target:
-                return (o if o >= target else target), "target", when
+            hit = intraday_exit(float(bar["Open"]), float(bar["High"]), float(bar["Low"]), stop, target)
+            if hit is not None:
+                price, why = hit
+                return price, _EXIT_REASON[why], min(start + BAR, now)
     if now >= flat_dt:
         if b.empty:
             return None
@@ -272,6 +301,9 @@ def resolve_exit(rec: dict[str, Any], bars: pd.DataFrame, now: dt.datetime,
         last = before if not before.empty else b
         return float(last["Close"].iloc[-1]), "flat_by", min(flat_dt, now)
     return None
+
+
+_EXIT_REASON = {"stop_loss": "stop", "take_profit": "target"}   # exits.intraday_exit -> journal words
 
 
 # ---------------------------------------------------------------- the session
@@ -567,7 +599,8 @@ class IntradaySession:
             state["universe"] = tickers
         bars = self._load_many(tickers, self._scan_days(now), now)
         report.scanned = sum(1 for b in bars.values() if not b.empty)
-        hits = [h for h in scan_orb(bars, day=now.date(), at=now.time(), or_minutes=cfg.or_minutes)
+        hits = [h for h in scan_orb(bars, day=now.date(), at=now.time(), or_minutes=cfg.or_minutes,
+                                    latest_entry=cfg.entry_end)
                 if h["setup"] == "orb_long"]
         report.triggered = len(hits)
 
@@ -710,7 +743,11 @@ class IntradaySession:
                           details={**details, "ticket": ticket.to_dict()})
             return "skip"
         approve(ticket, "yes", now=now)
-        fill = execute_paper(ticket, entry_px, now=now, ledger_path=self.ledger_path, costs=costs)
+        # The fill is the close of the last completed bar, so the trade's clock starts at that bar's
+        # END, not at the wall clock: resolve_exit then checks every bar after it, including one that
+        # closed between that bar and this cycle (a lagging download would otherwise hide its stop).
+        fill_time = fill_bar_end(es, now)
+        fill = execute_paper(ticket, entry_px, now=fill_time, ledger_path=self.ledger_path, costs=costs)
         state["entries"].append(ticket.ticket_id)
         details["ticket"] = ticket.to_dict()
         self._journal(report, now, "entry", ticker,
@@ -778,6 +815,17 @@ class IntradaySession:
 
 
 # ---------------------------------------------------------------- helpers
+
+def fill_bar_end(es: entry_mod.EntryState, now: dt.datetime) -> dt.datetime:
+    """End time of the bar whose close is the paper fill (the last completed bar; the trigger bar
+    when the trigger is fresh), never later than `now`."""
+    if es.last_bar_start is not None:
+        end = pd.Timestamp(es.last_bar_start).tz_convert(IST) + BAR
+        return min(end.to_pydatetime(), now)
+    if es.trigger_time is not None:
+        return min(es.trigger_time, now)
+    return now
+
 
 def _telegram(text: str) -> bool:
     from papertrader.notify import send_telegram

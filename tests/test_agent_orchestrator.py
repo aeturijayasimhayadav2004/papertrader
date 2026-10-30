@@ -9,7 +9,17 @@ from papertrader.costs import flat
 from papertrader.exits import ExitRules
 from papertrader.notify import format_summary
 from papertrader.storage import SQLiteStore, Store
-from tests.test_runner import AlwaysBuy, runner
+from tests.test_runner import IST, AlwaysBuy
+from tests.test_runner import runner as _runner
+
+
+def runner(cfg, store, n_days, **kw):
+    """test_runner's runner, but with the clock at 18:00 IST on the last bar's day (a run on time)."""
+    import pandas as pd
+    r = _runner(cfg, store, n_days, **kw)
+    last = pd.bdate_range("2024-01-01", periods=n_days)[-1].date()
+    r.now = dt.datetime.combine(last, dt.time(18, 0), IST)
+    return r
 
 
 def desk(status, summary="stub", calls=None):

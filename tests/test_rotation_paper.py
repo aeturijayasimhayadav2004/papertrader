@@ -4,7 +4,6 @@ import datetime as dt
 from zoneinfo import ZoneInfo
 
 import numpy as np
-import pandas as pd
 
 from papertrader.costs import SELL, flat
 from papertrader.portfolio.paper import TABLE, Account, RotationPaper, fill_pending, is_rebalance_day

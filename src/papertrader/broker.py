@@ -4,16 +4,15 @@ Orders are queued at a day's close and filled at the next trading day's open.
 Charges come from papertrader.costs. Stops, trailing stops and take-profit
 targets follow papertrader.exits, the same rules the backtester uses.
 
-`BrokerAPI` is the interface the runner relies on. A live adapter (see
-docs/ARCHITECTURE.md) must implement the same methods so strategies, risk and
-the runner do not change between paper and live.
+Real brokers are reached through papertrader.live (BrokerSession contract,
+OrderExecutor with paper / shadow / locked live modes); see docs/GO_LIVE.md.
 """
 from __future__ import annotations
 
 import datetime as dt
 import math
 from dataclasses import asdict, dataclass, field
-from typing import Any, Protocol
+from typing import Any
 
 from papertrader.costs import CostModel, as_cost_model
 from papertrader.exits import ExitRules, intraday_exit
@@ -88,23 +87,6 @@ class ClosedTrade:
     net_pnl: float
     return_pct: float
     exit_reason: str
-
-
-class BrokerAPI(Protocol):
-    """What the runner needs from any broker, paper or live."""
-    cash: float
-    positions: dict[str, Position]
-
-    @property
-    def pending_orders(self) -> list[Order]: ...
-    def pending_for(self, ticker: str) -> list[Order]: ...
-    def equity(self) -> float: ...
-    def reserved_cash(self) -> float: ...
-    def place_order(self, created_date: dt.date, ticker: str, side: str, qty: int, strategy: str,
-                    reason: str, max_notional: float | None = None,
-                    atr_at_signal: float | None = None) -> Order: ...
-    def mark(self, closes: dict[str, float]) -> None: ...
-    def drain_touched(self) -> list[Order]: ...
 
 
 @dataclass
@@ -207,9 +189,6 @@ class PaperBroker:
         order.qty = pos.qty
         self._finish(order, FILLED, day, price, trade.fees - pos.entry_fees)
 
-    def check_stops(self, day: dt.date, opens: dict[str, float], lows: dict[str, float]) -> list[ClosedTrade]:
-        return self.check_exits(day, opens, {}, lows)
-
     def check_exits(self, day: dt.date, opens: dict[str, float], highs: dict[str, float],
                     lows: dict[str, float]) -> list[ClosedTrade]:
         """Stop-loss / take-profit hits during `day` (see papertrader.exits)."""
@@ -235,6 +214,21 @@ class PaperBroker:
             self._finish(order, FILLED, day, price, trade.fees - pos.entry_fees, note)
             out.append(trade)
         return out
+
+    def apply_split(self, ticker: str, ratio: float) -> str:
+        """Rescale a held position (and queued orders) after a split / bonus. `ratio` = new price / old
+        price (1:1 bonus -> 0.5): shares are divided by it, prices multiplied, value unchanged."""
+        pos = self.positions[ticker]
+        old_qty = pos.qty
+        pos.qty = max(int(round(pos.qty / ratio)), 1)
+        for attr in ("entry_price", "stop_price", "last_price", "highest_close"):
+            setattr(pos, attr, getattr(pos, attr) * ratio)
+        if pos.target_price:
+            pos.target_price *= ratio
+        for o in self.pending_for(ticker):
+            o.qty = pos.qty if o.side == SELL else max(int(round(o.qty / ratio)), 1)
+        return (f"Corporate action on {ticker} (price ratio {ratio:.4g}): position rescaled from {old_qty} to "
+                f"{pos.qty} shares, entry Rs {pos.entry_price:,.2f}, stop Rs {pos.stop_price:,.2f}.")
 
     def mark(self, closes: dict[str, float]) -> None:
         """Mark positions at the close and trail stops (the new stop applies from the next day)."""

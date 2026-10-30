@@ -60,7 +60,6 @@ HORIZONS = (1, 5, 20)
 HISTORY_HORIZONS = (5, 20)
 MIN_N = 20                                  # below this a group is "too few to judge"
 TOO_FEW = f"too few to judge (n < {MIN_N})"
-DESKS = ("events", "news", "insider", "odds", "analyst", "brain")
 VETO_DECISIONS = {"veto", "skip", "block", "reject", "no", "pass", "avoid", "sell"}
 EDGE_PCT = 0.5                              # a setup's mean excess must beat +/- this (points) to be called an edge
 OUTCOME_KEYS = ("id", "brief_id", "kind", "as_of_date", "ticker", "strategy", "verdict", "horizon_days",

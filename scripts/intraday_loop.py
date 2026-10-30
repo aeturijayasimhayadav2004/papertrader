@@ -33,7 +33,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from papertrader.agent import market  # noqa: E402
-from papertrader.agent.intraday_runner import DEFAULT_STATE_DIR, IntradayConfig, IntradaySession  # noqa: E402
+from papertrader.agent.intraday_runner import (DEFAULT_STATE_DIR, IntradayConfig, IntradaySession,  # noqa: E402
+                                               _kill_switch_on)
 from papertrader.agent.market import CLOSE, IST  # noqa: E402
 
 log = logging.getLogger("intraday_loop")
@@ -188,7 +189,8 @@ def main() -> int:
     cfg = load_intraday_config(args.config)
     now = parse_now(args.now)
     notifier = (lambda text: print("\n[notify]\n" + text + "\n")) if args.dry_run else None
-    session = IntradaySession(cfg, now=now, notifier=notifier, state_dir=args.state_dir, dry_run=args.dry_run)
+    session = IntradaySession(cfg, now=now, notifier=notifier, state_dir=args.state_dir, dry_run=args.dry_run,
+                               kill_switch=lambda: _kill_switch_on(args.config))
 
     if args.status:
         st = session.status()

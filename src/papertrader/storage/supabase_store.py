@@ -21,9 +21,6 @@ class SupabaseStore:
 
         self.client = create_client(url, key, options=ClientOptions(postgrest_client_timeout=timeout))
 
-    def ping(self) -> None:
-        self.client.table("runs").select("run_id").limit(1).execute()
-
     def apply(self, ops: list[WriteOp]) -> None:
         for op in ops:
             pk, _ = TABLES[op.table]
@@ -34,10 +31,18 @@ class SupabaseStore:
                 for row in existing:
                     if row[pk] not in keep:
                         self.client.table(op.table).delete().eq(pk, row[pk]).execute()
+            elif op.kind == "delete_eq":
+                for f in op.rows:
+                    self.client.table(op.table).delete().eq(f["column"], f["value"]).execute()
+                continue
             elif op.kind != "upsert":
                 raise ValueError(f"unknown op {op.kind}")
             for i in range(0, len(op.rows), CHUNK):
                 self.client.table(op.table).upsert(op.rows[i:i + CHUNK], on_conflict=pk).execute()
+
+    def running_since(self, since_iso: str) -> list[dict[str, Any]]:
+        q = self.client.table("runs").select("run_id,host,started_at").eq("status", "running")
+        return q.gte("started_at", since_iso).execute().data or []
 
     def latest_state(self, before: dt.date | None = None) -> SavedState | None:
         q = self.client.table("daily_snapshots").select("as_of_date,state_json")

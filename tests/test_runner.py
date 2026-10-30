@@ -10,7 +10,7 @@ import pytest
 
 from papertrader.runner import DailyRunner
 from papertrader.selection import Selection
-from papertrader.storage import SQLiteStore, StateUnavailableError, Store
+from papertrader.storage import SQLiteStore, Store
 from papertrader.storage.schema import TABLES
 from papertrader.strategies import Signal, Strategy
 from tests.conftest import make_ohlc

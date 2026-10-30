@@ -138,6 +138,27 @@ class PriceCache:
         meta.write_text(json.dumps({"ticker": ticker, "fetched_at": now.isoformat(), "rows": len(df)}))
 
 
+def complete_calendar(frames: dict[str, pd.DataFrame], min_coverage: float = 0.9) -> list[pd.Timestamp]:
+    """Trading days across `frames`, without a trailing day that too few tickers have yet.
+
+    Yahoo publishes NSE daily bars ticker by ticker after the close; a run in between would see
+    today for some stocks and not others. Processing that day would lock in a half-published bar,
+    so the newest day counts only once at least `min_coverage` of the tickers have it.
+    """
+    frames = {t: df for t, df in frames.items() if len(df)}
+    if not frames:
+        return []
+    cal = sorted(set().union(*(df.index for df in frames.values())))
+    while cal:
+        have = sum(1 for df in frames.values() if cal[-1] in df.index)
+        if have >= min_coverage * len(frames):
+            break
+        log.warning("Latest bar %s published for only %d of %d tickers: treated as incomplete.",
+                    cal[-1].date(), have, len(frames))
+        cal = cal[:-1]
+    return cal
+
+
 def load_prices(
     tickers: list[str],
     cfg: DataConfig,

@@ -27,8 +27,8 @@ import pandas as pd
 
 from papertrader.agent import market
 from papertrader.config import Config
-from papertrader.costs import BUY, SELL, CostModel
-from papertrader.data import load_prices
+from papertrader.costs import BUY, SELL, CostModel, split_ratio
+from papertrader.data import complete_calendar, load_prices
 from papertrader.portfolio.backtest import rebalance_orders
 from papertrader.portfolio.rotation import build_rotation
 from papertrader.storage import Store, upsert
@@ -69,6 +69,7 @@ class Account:
     pending: list[list] = field(default_factory=list)   # [ticker, side, qty] for the next open
     last_rebalance: str | None = None
     fees_paid: float = 0.0
+    last_close: dict[str, float] = field(default_factory=dict)   # for split / bonus detection
 
     def to_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
@@ -77,17 +78,22 @@ class Account:
     def from_dict(cls, d: dict[str, Any]) -> "Account":
         return cls(float(d["cash"]), {k: int(v) for k, v in (d.get("holdings") or {}).items()},
                    [list(x) for x in d.get("pending") or []], d.get("last_rebalance"),
-                   float(d.get("fees_paid") or 0.0))
+                   float(d.get("fees_paid") or 0.0),
+                   {k: float(v) for k, v in (d.get("last_close") or {}).items()})
 
 
 def fill_pending(acct: Account, opens: dict[str, float], costs: CostModel, day: dt.date) -> list[dict]:
-    """Fill queued orders at today's opens (sells first, as queued). Returns fill records."""
+    """Fill queued orders at today's opens (sells first, as queued). Returns fill records.
+
+    An order whose stock has no bar today (suspended, data gap) stays queued for the next day."""
     fills = []
+    waiting = []
     for ticker, side, qty in acct.pending:
         px = opens.get(ticker)
         if px is None or not math.isfinite(px) or px <= 0:
+            waiting.append([ticker, side, qty])
             fills.append({"date": day.isoformat(), "ticker": ticker, "side": side, "qty": 0, "price": None,
-                          "fee": 0.0, "note": "no price today: order lapsed"})
+                          "fee": 0.0, "note": "no price today: order kept for the next open"})
             continue
         if side == SELL:
             qty = min(int(qty), acct.holdings.get(ticker, 0))
@@ -108,7 +114,7 @@ def fill_pending(acct: Account, opens: dict[str, float], costs: CostModel, day: 
         acct.fees_paid += fee
         fills.append({"date": day.isoformat(), "ticker": ticker, "side": side, "qty": qty, "price": round(px, 2),
                       "fee": round(fee, 2), "note": "rebalance"})
-    acct.pending = []
+    acct.pending = waiting
     return fills
 
 
@@ -139,15 +145,18 @@ class RotationPaper:
         from papertrader.agent.universe import load_universe
         return load_universe(self.pcfg.universe, cache_dir=self.cfg.data.cache_dir / "universe")
 
-    def _prices(self) -> tuple[dict[str, pd.DataFrame], pd.DataFrame | None]:
+    def _prices(self, held: list[str]) -> tuple[dict[str, pd.DataFrame], pd.DataFrame | None, set[str]]:
+        """(prices, benchmark, universe). Stocks still held but no longer in the index are loaded
+        too, so they are valued and sold at the next rebalance instead of counting as Rs 0."""
         start = self.now.date() - dt.timedelta(days=self.pcfg.history_days)
         data_cfg = dataclasses.replace(self.cfg.data, start=start, cache_dir=self.cfg.data.cache_dir / "rotation")
-        tickers = list(dict.fromkeys(self._tickers() + [self.cfg.benchmark]))
+        universe = set(self._tickers())
+        tickers = list(dict.fromkeys(sorted(universe) + sorted(held) + [self.cfg.benchmark]))
         prices, warnings = self.price_loader(tickers, data_cfg, now=self.now)
         if warnings:
             log.info("Rotation data: %d warning(s), e.g. %s", len(warnings), warnings[0])
         bench = prices.pop(self.cfg.benchmark, None)
-        return prices, bench
+        return prices, bench, universe
 
     def _latest(self) -> tuple[dt.date, Account] | None:
         rows = self.store.sqlite.rows(TABLE, order_by="as_of_date")
@@ -173,11 +182,11 @@ class RotationPaper:
 
     def run(self) -> list[str]:
         """Process every new completed trading day. Returns one-line events for the summary."""
-        prices, bench = self._prices()
+        saved = self._latest()
+        prices, bench, self._universe = self._prices(list(saved[1].holdings) if saved else [])
         if not prices:
             raise RuntimeError("no price data for the rotation universe")
-        cal = sorted(set().union(*(df.index for df in prices.values())))
-        saved = self._latest()
+        cal = complete_calendar({t: df for t, df in prices.items() if t in self._universe})
         if saved is None:
             days = cal[-1:]
             acct = Account(cash=self.pcfg.capital)
@@ -194,6 +203,18 @@ class RotationPaper:
                  acct: Account) -> list[str]:
         d = day.date()
         events = []
+        for t in list(acct.holdings):   # splits / bonuses: rescale holdings before trading
+            h = prices.get(t)
+            if h is not None:
+                h = h.loc[:day]
+                ratio = split_ratio(acct.last_close.get(t), float(h["Close"].iloc[-2])) if len(h) >= 2 else None
+                if ratio:
+                    old = acct.holdings[t]
+                    acct.holdings[t] = max(int(round(old / ratio)), 1)
+                    acct.pending = [[tk, sd, (max(int(round(q / ratio)), 1) if tk == t else q)]
+                                    for tk, sd, q in acct.pending]
+                    events.append(f"{d} rotation: corporate action on {t} (ratio {ratio:.4g}), "
+                                  f"{old} -> {acct.holdings[t]} shares.")
         opens = {t: v for t, df in prices.items() if (v := _row(df, day, "Open")) is not None}
         fills = fill_pending(acct, opens, self.costs, d)
         done = [f for f in fills if f["qty"]]
@@ -206,13 +227,16 @@ class RotationPaper:
             h = df.loc[:day, "Close"]
             if len(h):
                 closes[t] = float(h.iloc[-1])
+        acct.last_close = {t: closes[t] for t in acct.holdings if t in closes}
         held_value = sum(q * closes.get(t, 0.0) for t, q in acct.holdings.items())
         equity = acct.cash + held_value
 
         reasons: dict[str, str] = {}
         note = ""
-        if is_rebalance_day(d):
-            hist = {t: df.loc[:day] for t, df in prices.items()}
+        missed = bool(acct.last_rebalance) and (
+            (d.year * 12 + d.month) - (int(acct.last_rebalance[:4]) * 12 + int(acct.last_rebalance[5:7])) >= 2)
+        if is_rebalance_day(d) or missed:   # missed = a month-end holiday not yet in market.HOLIDAYS
+            hist = {t: df.loc[:day] for t, df in prices.items() if t in self._universe}
             bh = bench.loc[:day] if bench is not None else None
             dec = self.strategy.decide(hist, day, bh)
             reasons, note = dec.reasons, dec.note

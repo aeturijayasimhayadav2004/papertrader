@@ -59,10 +59,6 @@ def get_json(url: str, fetch: Fetch | None = None) -> Any:
     return json.loads((fetch or default_fetch)(url).decode("utf-8", "replace"))
 
 
-def get_text(url: str, fetch: Fetch | None = None) -> str:
-    return (fetch or default_fetch)(url).decode("utf-8", "replace")
-
-
 def url_with(base: str, **params: Any) -> str:
     q = urllib.parse.urlencode({k: v for k, v in params.items() if v is not None})
     return f"{base}?{q}" if q else base

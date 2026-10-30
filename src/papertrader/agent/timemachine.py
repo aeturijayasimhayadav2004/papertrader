@@ -10,10 +10,12 @@ Intraday (5-minute bars, IST):
                     stop is checked before the target, so a bar that touches both
                     counts as the stop (the pessimistic call). A gap through the
                     stop fills at the bar's open, which can be worse than -1R.
-  replay_orb_history re-runs a simple opening-range breakout on every past session:
+  replay_orb_history re-runs the opening-range breakout on every past session with
+                    the SAME rule as the live entry timer (entry.orb_trigger):
                     entry = the close of the first completed bar after the range
-                    that closes above the range high (no later than
-                    `latest_entry`), same stop / target / stop-first rules.
+                    that closes above the range high (ending by `latest_entry`);
+                    a close below the range low first means no trade that day.
+                    Same stop / target / stop-first rules.
 
 Swing (daily bars):
   signal_odds       replays THIS strategy's past BUY signals on THIS stock with the
@@ -28,7 +30,6 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-import math
 from typing import Any
 
 import numpy as np
@@ -250,45 +251,61 @@ def describe_session(result: dict[str, Any]) -> str:
 def replay_orb_history(history: pd.DataFrame, or_minutes: int = 15, stop_method: str = "or_mid",
                        target_r: float = 1.0, flat_by: dt.time | None = FLAT_BY,
                        latest_entry: dt.time = dt.time(14, 30), stop_pct: float | None = None) -> dict[str, Any]:
-    """Opening-range breakout on every past session: fired / target / stop / neither, plus each day."""
-    dates, M = session_matrix(history)
-    O, H, L, C = (M[c] for c in ("Open", "High", "Low", "Close"))
-    nb = max(1, or_minutes // BAR_MIN)
-    last = last_slot_before(flat_by)
-    latest = _minutes(latest_entry)
+    """Opening-range breakout on every past session: fired / target / stop / neither, plus each day.
+
+    The entry is entry.orb_trigger, the same rule the live entry timer and scanner use
+    (a close below the range low first means no trade that day). Sessions whose
+    opening range is incomplete are left out. Exits: bars ending after the trigger
+    bar, up to the flat-by time, by exits.intraday_exit (stop before target, gaps
+    fill at the open).
+    """
+    from papertrader.agent import entry as entry_mod
+    from papertrader.exits import intraday_exit
+
     days: list[dict[str, Any]] = []
-    for i, d in enumerate(dates):
-        if not np.all(np.isfinite(H[i, :nb])) or not np.isfinite(C[i, :last + 1]).any():
+    if history is None or history.empty:
+        grouped: list[tuple[dt.date, pd.DataFrame]] = []
+    else:
+        b = history.copy()
+        b.index = _ist_index(history)
+        mins = b.index.hour * 60 + b.index.minute - OPEN_MIN
+        b = b[(mins >= 0) & (mins % BAR_MIN == 0) & (b.index.second == 0)]
+        grouped = [(d, g) for d, g in b.groupby(b.index.date)]
+    step = pd.Timedelta(minutes=BAR_MIN)
+    for d, g in grouped:
+        sb = entry_mod.session_bars(g, d)
+        res = entry_mod.orb_trigger(sb, or_minutes, BAR_MIN, latest_entry)
+        if res.status == "no_data":
             continue
-        rh, rl = float(np.max(H[i, :nb])), float(np.min(L[i, :nb]))
-        trig = next((j for j in range(nb, last + 1)
-                     if OPEN_MIN + BAR_MIN * (j + 1) <= latest and np.isfinite(C[i, j]) and C[i, j] > rh), None)
+        flat_dt = dt.datetime.combine(d, flat_by or CLOSE, IST)
+        upto = sb[sb.index + step <= flat_dt]
+        if upto.empty:
+            continue
+        rh, rl = float(res.range_high), float(res.range_low)
+        fired = res.status == "triggered"
         day: dict[str, Any] = {"date": d.isoformat(), "range_high": round(rh, 2), "range_low": round(rl, 2),
-                               "fired": trig is not None}
-        if trig is None:
-            days.append({**day, "outcome": "no_trigger"})
+                               "fired": fired}
+        if not fired:
+            days.append({**day, "outcome": "no_trigger", "why": res.reason})
             continue
         try:
-            p = plan_trade("ORB", float(C[i, trig]), stop_method=stop_method, range_high=rh, range_low=rl,
+            p = plan_trade("ORB", float(res.trigger_price), stop_method=stop_method, range_high=rh, range_low=rl,
                            stop_pct=stop_pct, target_r=target_r, flat_by=flat_by)
         except PlanError as exc:
             days.append({**day, "fired": False, "outcome": "skipped", "why": str(exc)})
             continue
         risk = p.entry - p.stop
         outcome, r = "neither", None
-        for j in range(trig + 1, last + 1):
-            if not np.isfinite(C[i, j]):
-                continue
-            if L[i, j] <= p.stop:
-                outcome, r = "stop", (min(O[i, j], p.stop) - p.entry) / risk
-                break
-            if H[i, j] >= p.target:
-                outcome, r = "target", (max(O[i, j], p.target) - p.entry) / risk
+        later = upto[upto.index > res.trigger_start]
+        for _, bar in later.iterrows():
+            hit = intraday_exit(float(bar["Open"]), float(bar["High"]), float(bar["Low"]), p.stop, p.target)
+            if hit is not None:
+                price, why = hit
+                outcome, r = ("stop" if why == "stop_loss" else "target"), (price - p.entry) / risk
                 break
         if r is None:
-            closes = C[i, :last + 1]
-            r = (float(closes[np.isfinite(closes)][-1]) - p.entry) / risk
-        days.append({**day, "entry_time": slot_time(trig + 1).strftime("%H:%M"), "entry": p.entry, "stop": p.stop,
+            r = (float(upto["Close"].iloc[-1]) - p.entry) / risk
+        days.append({**day, "entry_time": res.trigger_time.strftime("%H:%M"), "entry": p.entry, "stop": p.stop,
                      "target": p.target, "outcome": outcome, "r": round(float(r), 3)})
     fired = [x for x in days if x["fired"]]
     rs = [x["r"] for x in fired]

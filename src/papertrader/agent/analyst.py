@@ -77,12 +77,6 @@ def _pct(a: float | None, b: float | None) -> float | None:
     return round(100.0 * (a - b) / abs(b), 1)
 
 
-def _margin(part: float | None, whole: float | None) -> float | None:
-    if part is None or not whole:
-        return None
-    return round(100.0 * part / whole, 1)
-
-
 def quarterly_facts(ticker: str, loader: Loader | None = None) -> pd.DataFrame:
     """One row per quarter (index = quarter end, newest first). Missing values are NaN.
 

@@ -12,8 +12,13 @@ and callers that need closed bars only (entry.py, scanner.scan_orb) filter by
 start + interval <= now themselves.
 
 Cache: one CSV per ticker and interval. While the market is open it is fresh
-for CACHE_TTL_OPEN (5 minutes); when it is closed it stays fresh as long as it
-was fetched after the latest session's close. A failed download falls back to
+only if it was fetched at least CACHE_GRACE (30 s) after the latest bar boundary
+(09:15 + k x interval) AND it already holds the bar that closed at that boundary;
+when Yahoo lagged and that bar is missing, it is refetched once CACHE_TTL_OPEN
+(60 s) has passed. So a 5-minute cycle always sees the bar that just closed
+(a 5-minute TTL equal to the cycle let a cycle reuse the previous cycle's bars
+and miss it). When the market is closed the cache stays fresh as long as it was
+fetched after the latest session's close. A failed download falls back to
 the stale cache, then to an empty frame. Nothing here raises in normal use.
 """
 from __future__ import annotations
@@ -35,7 +40,8 @@ log = logging.getLogger(__name__)
 
 COLUMNS = ["Open", "High", "Low", "Close", "Volume"]
 MAX_DAYS = {"1m": 7, "2m": 59, "5m": 59, "15m": 59, "30m": 59}
-CACHE_TTL_OPEN = dt.timedelta(minutes=5)
+CACHE_TTL_OPEN = dt.timedelta(seconds=60)   # retry a cache still missing the just-closed bar
+CACHE_GRACE = dt.timedelta(seconds=30)      # Yahoo needs a moment after each bar boundary
 DEFAULT_CACHE_DIR = PROJECT_ROOT / "data" / "cache" / "intraday"
 
 IntradayDownloader = Callable[[str, str, int], pd.DataFrame]   # (ticker, interval, days) -> raw frame
@@ -107,17 +113,35 @@ def _read_cache(csv: Path, interval: str) -> pd.DataFrame | None:
         return None
 
 
-def _is_fresh(meta: Path, days: int, now: dt.datetime) -> bool:
+def latest_boundary(now: dt.datetime, interval: str = "5m") -> dt.datetime:
+    """The most recent bar boundary (09:15 + k x interval) at or before `now`, IST."""
+    now = market.now_ist(now)
+    step = interval_minutes(interval)
+    open_dt = dt.datetime.combine(now.date(), OPEN, IST)
+    k = max(0, int((now - open_dt).total_seconds() // 60) // step)
+    return open_dt + dt.timedelta(minutes=k * step)
+
+
+def _is_fresh(meta: Path, days: int, now: dt.datetime, interval: str = "5m") -> bool:
     try:
         info = json.loads(meta.read_text())
         fetched = dt.datetime.fromisoformat(info["fetched_at"]).astimezone(IST)
         if int(info.get("days", 0)) < days:
             return False
+        last_bar = info.get("last_bar")
+        last_bar = dt.datetime.fromisoformat(last_bar).astimezone(IST) if last_bar else None
     except (OSError, ValueError, KeyError, TypeError):
         return False
     status = market.market_status(now)
     if status.is_open:
-        return now - fetched < CACHE_TTL_OPEN
+        if fetched > now:
+            return False
+        boundary = latest_boundary(now, interval)
+        if fetched < boundary + CACHE_GRACE:
+            return False                      # fetched before (or right at) the latest bar closed
+        just_closed = boundary - dt.timedelta(minutes=interval_minutes(interval))
+        has_it = last_bar is not None and last_bar >= just_closed
+        return has_it or now - fetched < CACHE_TTL_OPEN
     # Closed: fresh if fetched after the most recent session closed.
     last_day = now.date() if (market.is_trading_day(now.date()) and now.time() >= CLOSE) \
         else market.previous_trading_day(now.date())
@@ -136,7 +160,7 @@ def load_intraday(ticker: str, interval: str = "5m", days: int = 59, downloader:
     cache = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
     csv, meta = _paths(cache, ticker, interval)
 
-    df = _read_cache(csv, interval) if _is_fresh(meta, days, now) else None
+    df = _read_cache(csv, interval) if _is_fresh(meta, days, now, interval) else None
     if df is None or df.empty:
         try:
             df = clean_intraday((downloader or yahoo_intraday)(ticker, interval, days), interval)
@@ -146,7 +170,8 @@ def load_intraday(ticker: str, interval: str = "5m", days: int = 59, downloader:
                 cache.mkdir(parents=True, exist_ok=True)
                 df.to_csv(csv)
                 meta.write_text(json.dumps({"ticker": ticker, "interval": interval, "days": days,
-                                            "fetched_at": now.isoformat(), "rows": len(df)}))
+                                            "fetched_at": now.isoformat(), "rows": len(df),
+                                            "last_bar": df.index[-1].isoformat()}))
             except OSError as exc:
                 log.warning("Could not cache intraday %s: %s", ticker, exc)
         except Exception as exc:  # network, rate limit, delisted ticker
@@ -158,15 +183,6 @@ def load_intraday(ticker: str, interval: str = "5m", days: int = 59, downloader:
                         stale.index[-1].strftime("%d %b %H:%M"))
             df = stale
     return df[df.index <= now]
-
-
-def session_days(bars: pd.DataFrame) -> list[dt.date]:
-    """Distinct IST dates that have bars, oldest first."""
-    if bars is None or bars.empty:
-        return []
-    idx = pd.DatetimeIndex(bars.index)
-    idx = idx.tz_localize(IST) if idx.tz is None else idx.tz_convert(IST)
-    return sorted(set(idx.date))
 
 
 def bars_on(bars: pd.DataFrame, day: dt.date) -> pd.DataFrame:

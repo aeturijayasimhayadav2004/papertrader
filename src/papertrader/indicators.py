@@ -33,10 +33,6 @@ def prior_low(low: pd.Series, window: int) -> pd.Series:
     return low.rolling(window, min_periods=window).min().shift(1)
 
 
-def ema(series: pd.Series, span: int) -> pd.Series:
-    return series.ewm(span=span, adjust=False, min_periods=span).mean()
-
-
 def true_range(df: pd.DataFrame) -> pd.Series:
     prev_close = df["Close"].shift(1)
     return pd.concat([df["High"] - df["Low"], (df["High"] - prev_close).abs(),

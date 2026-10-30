@@ -20,10 +20,12 @@ Each hit gets a `score` so different setups can be ranked together; scores are
 rough (bigger move, bigger volume, deeper oversold = higher), not odds.
 
 Opening-range breakout scan (during the session, on 5-minute bars): the range
-is the high and low of the first `or_minutes` from 09:15 IST. A hit is the first
-COMPLETED bar after the range that closes above the range high (long) or below
-the range low (short; flagged for information only, the agent trades longs).
-A bar counts only once start + bar length <= `at`, the same rule as entry.py.
+is the high and low of the first `or_minutes` from 09:15 IST, and the rule is
+entry.orb_trigger, shared with entry.check_orb and the time machine: a long hit is
+the first COMPLETED bar after the range, ending by `latest_entry`, that closes
+above the range high. A close below the range low first kills the long and is
+reported as orb_short (information only; the agent trades longs). A bar counts
+only once start + bar length <= `at`. An incomplete opening range is skipped.
 """
 from __future__ import annotations
 
@@ -173,8 +175,15 @@ def _latest_day(bars_by_ticker: dict[str, pd.DataFrame]) -> dt.date | None:
 
 
 def scan_orb(bars_by_ticker: dict[str, pd.DataFrame], day: dt.date | None = None, at: dt.time | None = None,
-             or_minutes: int = 15) -> list[dict[str, Any]]:
-    """First completed close outside the opening range, per ticker, as of `at` (IST) on `day`."""
+             or_minutes: int = 15, latest_entry: dt.time = dt.time(14, 30)) -> list[dict[str, Any]]:
+    """Opening-range breakout hits per ticker as of `at` (IST) on `day`, by entry.orb_trigger.
+
+    orb_long: orb_trigger says "triggered" (the same answer entry.check_orb gives).
+    orb_short: orb_trigger says the long expired because a completed bar closed
+    below the range low first. That is the same event that kills the long, flagged
+    for information only; the agent never trades it. Tickers whose opening range is
+    incomplete (orb_trigger "no_data") are skipped.
+    """
     bars_by_ticker = bars_by_ticker or {}
     now = market.now_ist()
     if day is None:
@@ -196,29 +205,27 @@ def scan_orb(bars_by_ticker: dict[str, pd.DataFrame], day: dt.date | None = None
             if day_bars.empty:
                 continue
             step = entry_mod.infer_bar_minutes(day_bars)
-            done = entry_mod.completed(day_bars, clock, step)
-            rng = done[done.index < or_end]
-            if len(rng) < max(1, or_minutes // step):
-                continue  # a range bar is missing: halted or thin
-            hi, lo = float(rng["High"].max()), float(rng["Low"].min())
-            for start, bar in done[done.index >= or_end].iterrows():
-                close = float(bar["Close"])
-                if close > hi or close < lo:
-                    end = start + pd.Timedelta(minutes=step)
-                    long = close > hi
-                    pct = 100.0 * (close / hi - 1.0) if long else 100.0 * (1.0 - close / lo)
-                    side = "above the range high" if long else "below the range low"
-                    lvl = hi if long else lo
-                    hits.append({
-                        "ticker": ticker, "setup": "orb_long" if long else "orb_short",
-                        "close": round(close, 2), "time": end.strftime("%H:%M"),
-                        "range_high": round(hi, 2), "range_low": round(lo, 2), "pct_beyond": round(pct, 2),
-                        "score": round(pct, 2), "date": day.isoformat(),
-                        "detail": (f"{symbol(ticker)}: the {start:%H:%M} bar closed {_rs(close)}, {pct:.2f}% {side} "
-                                   f"{_rs(lvl)} (range {_rs(lo)}-{_rs(hi)}), at {end:%H:%M} IST"
-                                   + ("" if long else "; short side is for information only") + "."),
-                    })
-                    break
+            res = entry_mod.orb_trigger(day_bars, or_minutes, step, latest_entry, at=clock)
+            if res.status == "triggered":
+                long, start, end, close = True, res.trigger_start, res.trigger_time, res.trigger_price
+            elif res.status == "expired" and res.reason == entry_mod.ORB_LOW_BREAK:
+                long, start, end, close = False, res.break_start, res.break_time, res.break_price
+            else:
+                continue          # no_data (range incomplete), waiting, or expired at the cutoff
+            hi, lo = float(res.range_high), float(res.range_low)
+            pct = 100.0 * (close / hi - 1.0) if long else 100.0 * (1.0 - close / lo)
+            side = "above the range high" if long else "below the range low"
+            lvl = hi if long else lo
+            hits.append({
+                "ticker": ticker, "setup": "orb_long" if long else "orb_short",
+                "close": round(close, 2), "time": end.strftime("%H:%M"),
+                "range_high": round(hi, 2), "range_low": round(lo, 2), "pct_beyond": round(pct, 2),
+                "score": round(pct, 2), "date": day.isoformat(),
+                "detail": (f"{symbol(ticker)}: the {start:%H:%M} bar closed {_rs(close)}, {pct:.2f}% {side} "
+                           f"{_rs(lvl)} (range {_rs(lo)}-{_rs(hi)}), at {end:%H:%M} IST"
+                           + ("" if long else "; the long setup failed, short side is for information only")
+                           + "."),
+            })
         except Exception as exc:
             log.warning("ORB scan skipped %s: %s", ticker, exc)
     hits.sort(key=lambda x: (x["setup"] != "orb_long", -x["score"], x["ticker"]))

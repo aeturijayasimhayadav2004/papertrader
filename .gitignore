@@ -22,3 +22,6 @@ venv/
 build/
 dist/
 !reports/rotation_research.md
+
+# Local editor / MCP config (not project code)
+.mcp.json

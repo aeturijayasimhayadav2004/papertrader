@@ -145,5 +145,12 @@ def replace(table: str, rows: list[dict[str, Any]]) -> WriteOp:
     return WriteOp("replace", table, [normalize_row(table, r) for r in rows])
 
 
+def delete_eq(table: str, column: str, value: Any) -> WriteOp:
+    """Delete every row of `table` whose `column` equals `value` (forced re-runs clear a day first)."""
+    if column not in TABLES[table][1]:
+        raise KeyError(f"{table}: unknown column {column!r}")
+    return WriteOp("delete_eq", table, [{"column": column, "value": jsonable(value)}])
+
+
 def dumps(obj: Any) -> str:
     return json.dumps(jsonable(obj), separators=(",", ":"))

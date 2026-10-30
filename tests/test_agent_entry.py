@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from papertrader.agent.entry import check_orb
+from papertrader.agent.entry import ORB_INCOMPLETE, ORB_LOW_BREAK, check_orb, orb_trigger, session_bars
 from papertrader.agent.market import IST
 
 DAY = dt.date(2026, 10, 28)          # a Wednesday, a normal session
@@ -122,3 +122,55 @@ def test_real_infy_fixture():
     later = check_orb(b, at=at(11, 0))
     assert later.status == "expired" and "10:20 bar" in later.reason
     assert later.to_dict()["day"] == "2026-10-28"
+
+
+def test_incomplete_opening_range_is_no_data():
+    b = breakout_day().drop(pd.Timestamp(at(9, 20)))      # one of the three range bars is missing
+    s = check_orb(b, at=at(10, 0))
+    assert s.status == "no_data" and ORB_INCOMPLETE in s.reason and "2 of 3" in s.reason
+    r = orb_trigger(session_bars(b, DAY), 15, 5, at=at(10, 0))
+    assert r.status == "no_data" and r.reason == ORB_INCOMPLETE and (r.range_bars, r.need_bars) == (2, 3)
+    # Yahoo lagging: at 09:31 the 09:25 bar is complete by the clock but not in the data yet.
+    lag = breakout_day().iloc[:2]
+    assert check_orb(lag, at=at(9, 31)).status == "no_data"
+
+
+def low_then_high_day():
+    """Closes below the range low first (09:30 bar, 98.5), then above the high (09:35 bar, 102)."""
+    closes = [100.2, 100.4, 100.0, 98.5, 102.0] + [102.0] * 70
+    highs = RANGE["highs"] + [100.0, 102.5] + [102.2] * 70
+    lows = RANGE["lows"] + [98.0, 98.4] + [101.8] * 70
+    return bars(closes, highs, lows)
+
+
+def test_entry_scanner_and_replay_agree_on_low_first_then_high():
+    from papertrader.agent import scanner
+    from papertrader.agent.timemachine import replay_orb_history
+
+    b = low_then_high_day()
+    es = check_orb(b, at=at(10, 0))
+    assert es.status == "expired" and "below the range low" in es.reason
+    r = orb_trigger(session_bars(b, DAY), 15, 5, at=at(10, 0))
+    assert r.status == "expired" and r.reason == ORB_LOW_BREAK and r.break_start == pd.Timestamp(at(9, 30))
+    hits = scanner.scan_orb({"X.NS": b}, day=DAY, at=dt.time(10, 0))
+    assert [h["setup"] for h in hits] == ["orb_short"]                  # no long hit, like check_orb
+    assert hits[0]["time"] == "09:35" and "information only" in hits[0]["detail"]
+    res = replay_orb_history(b, or_minutes=15, target_r=1.0)
+    assert res["sessions"] == 1 and res["fired"] == 0
+    assert res["days"][0]["outcome"] == "no_trigger" and res["days"][0]["why"] == ORB_LOW_BREAK
+
+
+def test_entry_scanner_and_replay_agree_on_a_clean_breakout():
+    from papertrader.agent import scanner
+    from papertrader.agent.timemachine import replay_orb_history
+
+    closes = [100.2, 100.4, 100.0, 100.5, 102.0] + [102.0] * 70
+    highs = RANGE["highs"] + [100.9, 102.2] + [102.2] * 70
+    lows = RANGE["lows"] + [99.8, 100.4] + [101.8] * 70
+    b = bars(closes, highs, lows)
+    es = check_orb(b, at=at(10, 0))
+    (hit,) = scanner.scan_orb({"X.NS": b}, day=DAY, at=dt.time(10, 0))
+    res = replay_orb_history(b, or_minutes=15, target_r=1.0)
+    assert es.status == "triggered" and hit["setup"] == "orb_long" and res["fired"] == 1
+    assert es.trigger_time.strftime("%H:%M") == hit["time"] == res["days"][0]["entry_time"] == "09:40"
+    assert es.trigger_price == hit["close"] == res["days"][0]["entry"] == 102.0

@@ -54,6 +54,11 @@ HOLIDAYS: dict[dt.date, str] = {
 }
 
 
+def holidays_known(year: int) -> bool:
+    """True when HOLIDAYS lists the given year (NSE publishes the next year's list in December)."""
+    return any(d.year == year for d in HOLIDAYS)
+
+
 def now_ist(now: dt.datetime | None = None) -> dt.datetime:
     if now is None:
         return dt.datetime.now(IST)

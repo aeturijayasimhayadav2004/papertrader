@@ -14,7 +14,7 @@ their terms.
 
 | Technique | Seen in | Where it lives here |
 |---|---|---|
-| Same strategy and risk code for backtest, paper and live | QuantConnect Lean, NautilusTrader | `strategies/`, `exits.py`, `costs.py` are shared by `backtest.py` and `broker.py`; `BrokerAPI` protocol in `broker.py` |
+| Same strategy and risk code for backtest, paper and live | QuantConnect Lean, NautilusTrader | `strategies/`, `exits.py`, `costs.py` are shared by `backtest.py` and `broker.py`; `live/interface.BrokerSession` for real brokers |
 | Itemised Indian charges (STT, stamp duty, exchange, SEBI, GST, DP) plus slippage | Zerodha/Upstox brokerage calculators, Lean fee models | `costs.py` (`costs.model: india_delivery`) |
 | ATR-based stops, trailing stop, take-profit (ROI) | Freqtrade (`stoploss`, `trailing_stop`, `minimal_roi`), Turtle rules | `exits.py`, `risk:` config |
 | Volatility / risk-per-trade position sizing | Turtle rules, Lean portfolio construction | `risk.py` (`sizing: risk_based`) |
@@ -47,7 +47,7 @@ agent/        ──► desks brief every buy candidate (events, news, insider, 
 runner.py     ──► per day: fills → exits → mark/trail → buy blockers → decisions → persist
    │   uses: risk.py (size, limits) · protections.py · exits.py · costs.py
    │
-BrokerAPI     ──► PaperBroker today; a live adapter later (same methods)
+live/         ──► BrokerSession contract, SimulatedExchange, OrderExecutor (paper | shadow | live, locked), reconcile, preflight
    │
 storage/      ──► SQLite (always) + Supabase (primary in CI) + outbox
 dashboard/    ──► Streamlit, read-only key
@@ -70,7 +70,7 @@ a clean test.
 **Stage B. Shadow mode (planned).** A broker adapter logs in, reads funds, holdings and
 the order book, and *computes* the orders it would place, but never sends them. Each
 day it reconciles broker holdings against PaperTrader's positions and alerts on any
-difference. Needed: `brokers/<name>.py` implementing `BrokerAPI` in read-only mode, a
+difference. Built: `live/` (BrokerSession contract, SimulatedExchange, OrderExecutor shadow mode, reconcile, scripts/preflight.py). Still needed: `live/brokers/<name>.py` for the chosen broker, a
 `reconcile()` step in the runner, and `trading.mode: shadow`.
 
 **Stage C. Small live (planned).** Real orders, with a hard capital cap (for example
